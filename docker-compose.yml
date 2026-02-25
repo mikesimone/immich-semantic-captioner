@@ -3,10 +3,11 @@ name: immich-semantic-captioner
 services:
   immich-captioner:
     container_name: immich_captioner
-    build:
-      context: ./captioner
-      args:
-        CUDA_BASE_IMAGE: ${CUDA_BASE_IMAGE}
+    image: immich-semantic-captioner:known-good
+
+    # Join the existing Immich compose network so "immich_postgres" resolves
+    networks:
+      - immich_default
 
     environment:
       # Immich API
@@ -28,14 +29,14 @@ services:
       # Florence model
       - FLORENCE_MODEL=${FLORENCE_MODEL}
 
-      # Postgres
+      # Postgres (must be reachable on immich_default)
       - PGHOST=${PGHOST}
       - PGPORT=${PGPORT}
       - PGDATABASE=${PGDATABASE}
       - PGUSER=${PGUSER}
       - PGPASSWORD=${PGPASSWORD}
 
-      # Identity controls (still supported)
+      # Identity + overrides
       - PYTHONPATH=/opt/overrides
       - IDENTITY_ALBUM_MAP=${IDENTITY_ALBUM_MAP}
       - IDENTITY_NOUN_HINTS=${IDENTITY_NOUN_HINTS}
@@ -51,3 +52,7 @@ services:
 
 volumes:
   captioner-hf-cache:
+
+networks:
+  immich_default:
+    external: true
