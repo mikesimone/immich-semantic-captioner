@@ -162,6 +162,45 @@ Joey Graduation
 
 The system extracts the first name token (and optional last initial) and ignores non-person suffix text.
 
+## Configuring Recognized People
+
+You must explicitly define which names should be recognized and injected.
+
+Edit your `.env` file:
+
+IDENTITY_ALBUM_MAP=Lydia:Lydia,Me:Me,Joey:Joey
+IDENTITY_NOUN_HINTS=Lydia:woman|girl,Me:man|guy,Joey:boy|child
+IDENTITY_ENSURE_MODE=prefix
+
+### IDENTITY_ALBUM_MAP
+
+Maps album title tokens to the canonical name injected into captions.
+
+Format:
+MatchToken:CanonicalName
+
+Example:
+Album "002.002 - Lydia Being a Good Girl"
+→ Injects: Lydia
+
+You can name albums anything you want.
+The system only looks for defined match tokens.
+
+### IDENTITY_NOUN_HINTS (Optional)
+
+Used to replace generic phrases like:
+- "a woman"
+- "the man"
+- "a young boy"
+
+If omitted, the identity will still be injected,
+but generic noun replacement will be skipped.
+
+### Important
+
+Only names defined in IDENTITY_ALBUM_MAP are injected.
+No guessing. No heuristics.
+
 ---
 
 ## Database Changes
