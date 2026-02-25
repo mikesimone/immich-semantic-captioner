@@ -186,85 +186,71 @@ def clean_caption(raw: str) -> str:
 
 
 # ----------------------------
-# Identity overrides (automatic from album names)
+# Identity overrides (ONLY from IDENTITY_ALBUM_MAP)
 # ----------------------------
 
-# Matches album names like:
-#   "002.000 - Lydia"
-#   "003.000 - Andy"
-#   "100.000.014 - Meaghan"
-IDENTITY_ALBUM_PATTERN = re.compile(
-    r'^\d+(?:\.\d+)*\s*-\s*([A-Za-z][A-Za-z0-9 .\'-]+)$'
-)
-
 def extract_identities_from_albums(albums: List[str]) -> List[str]:
-    identities = []
+    """Return canonical identities ONLY when an album title matches a key in IDENTITY_ALBUM_MAP.
 
-    for album in albums:
+    - No guessing.
+    - No parsing names out of album strings.
+    - If you do not explicitly list a name in .env, it will never be injected.
+    """
+    found: List[str] = []
+    for album in albums or []:
         if not album:
             continue
+        for album_kw, rx in _IDENTITY_ALBUM_REGEXES.items():
+            if rx.search(album):
+                canonical = _IDENTITY_MAP.get(album_kw)
+                if canonical:
+                    found.append(canonical)
 
-        m = IDENTITY_ALBUM_PATTERN.match(album.strip())
-        if not m:
-            continue
-
-        suffix = m.group(1).strip()
-
-        parts = suffix.split()
-
-        if not parts:
-            continue
-
-        # Case 1: single name
-        name = parts[0]
-
-        # Case 2: name with single-letter last initial
-        if len(parts) >= 2 and len(parts[1]) == 1 and parts[1].isalpha():
-            name = parts[0] + " " + parts[1]
-
-        identities.append(name)
-
-    # dedupe preserve order
+    # dedupe, preserve order
     seen = set()
-    out = []
-
-    for name in identities:
-        key = name.lower()
-        if key not in seen:
-            seen.add(key)
+    out: List[str] = []
+    for name in found:
+        k = name.lower()
+        if k not in seen:
+            seen.add(k)
             out.append(name)
-
     return out
+
 
 def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List[str]]:
     if not caption:
         return caption, []
 
     identities = extract_identities_from_albums(albums)
-
     if not identities:
         return caption, []
 
     out = caption
 
-    # Replace generic person references conservatively
+    # 1) Optional noun replacement (only if hints exist for this identity)
+    #    Example: "a woman" -> "Lydia" (but ONLY for identities you explicitly configured)
     for name in identities:
-        out = re.sub(
-            r'\b(a|the)\s+([a-z]+\s+)?(woman|man|person|girl|boy)\b',
-            name,
-            out,
-            flags=re.IGNORECASE,
-        )
+        nouns = _IDENTITY_HINTS.get(name) or _IDENTITY_HINTS.get(name.split()[0])
+        if nouns:
+            # Build a conservative pattern from your explicit noun list
+            noun_alt = "|".join(re.escape(n) for n in nouns)
+            out = re.sub(
+                rf"\b(a|the)\s+([a-z]+\s+)?({noun_alt})\b",
+                name,
+                out,
+                flags=re.IGNORECASE,
+            )
 
-    # Guarantee identity presence
+    # 2) Guarantee identity presence
     for name in identities:
-        if not re.search(rf'\b{re.escape(name)}\b', out, flags=re.IGNORECASE):
-            out = f"{name}: {out}"
+        if not re.search(rf"\b{re.escape(name)}\b", out, flags=re.IGNORECASE):
+            if IDENTITY_ENSURE_MODE == "suffix":
+                out = f"{out} | {name}"
+            else:
+                out = f"{name}: {out}"
 
     out = _WS_REGEX.sub(" ", out).strip()[:MAX_CAPTION_CHARS]
-
     return out, identities
-
 
 
 # ----------------------------
