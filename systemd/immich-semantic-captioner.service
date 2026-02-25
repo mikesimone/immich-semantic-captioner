@@ -1,0 +1,15 @@
+[Unit]
+Description=Immich Semantic Captioner (docker compose)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/immich-semantic-captioner
+ExecStart=/usr/bin/docker compose up -d immich-captioner
+ExecStop=/usr/bin/docker compose down
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
