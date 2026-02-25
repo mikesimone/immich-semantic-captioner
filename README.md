@@ -1,174 +1,129 @@
 # Immich Semantic Captioner
 
-Adds OCR-first, Florence-2 powered semantic descriptions to Immich assets.
+![Docker](https://img.shields.io/badge/docker-required-blue)
+![GPU Optional](https://img.shields.io/badge/GPU-optional-green)
+![Model](https://img.shields.io/badge/model-Florence--2-purple)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-This service automatically generates human-readable descriptions for images stored in Immich and writes them into `asset_exif.description`, enabling significantly improved natural-language search.
-
----
-
-## Quickstart
-
-### Prerequisites
-
-- Immich already running
-- Docker
-- (Recommended) NVIDIA GPU + NVIDIA Container Toolkit for acceleration
-- Immich API key
-- Network access from this container to:
-  - Immich server (`IMMICH_URL`)
-  - Immich Postgres (`PGHOST`, usually `immich_postgres`)
-
-### 1) Clone
-
-```
-git clone https://github.com/mikesimone/immich-semantic-captioner.git
-cd immich-semantic-captioner
-```
-
-### 2) Configure
-
-```
-cp .env.example .env
-```
-
-Edit `.env` and set:
-
-- `IMMICH_URL`
-- `IMMICH_API_KEY`
-- Postgres settings (`PGHOST`, `PGPASSWORD`, etc.)
-
-### 3) Run (GPU mode)
-
-```
-docker compose up -d immich-captioner
-```
-
-### 4) Watch logs
-
-```
-docker logs -f immich_captioner
-```
+Semantic captioning and identity-aware description injection for Immich.
 
 ---
 
-## CPU-only Mode
+## What This Project Does
 
-This project can run on CPU, but it will be significantly slower.
+This system augments Immich search by:
 
-### Steps
-
-1) Remove the `gpus: all` line from `docker-compose.yml`
-
-2) Set in `.env`:
-
-```
-CUDA_BASE_IMAGE=ubuntu:24.04
-```
-
-3) Rebuild:
-
-```
-docker compose build --no-cache immich-captioner
-docker compose up -d immich-captioner
-```
+- Running Florence-2 for OCR-first image captioning
+- Writing captions into `asset_exif.description`
+- Injecting human identity based on album names
+- Guaranteeing name presence in descriptions
+- Enabling semantic search across reaction memes, personal photos, and structured albums
 
 ---
 
-## What This Does
+## Why This Is Better Than Default Immich Search
 
-For each Immich asset with an empty description:
+Immich's built-in ML search relies on embeddings and object detection.
 
-1. Pulls candidate assets directly from Immich’s Postgres database.
-2. Fetches the asset thumbnail via the Immich API.
-3. Runs Florence-2:
-   - OCR first (for screenshots, memes, documents)
-   - Detailed caption fallback (for photos)
-4. Cleans watermark and meme boilerplate text.
-5. Injects deterministic identity tokens based on album naming convention.
-6. Updates the description via Immich’s API.
-7. Skips problematic assets via a persistent skip table.
+This system:
+
+- Forces deterministic identity presence
+- Prioritizes OCR (critical for memes)
+- Stores results in first-class searchable fields
+- Allows identity-based semantic retrieval
+- Enables album-driven metadata logic
+
+You can now search:
+
+- “Lydia black dress”
+- “Joey graduation stage”
+- “Me tattoo progress”
+- “Funny meme about work”
+
+And actually get consistent, meaningful results.
 
 ---
 
 ## Architecture Overview
 
+See included diagram: `architecture_diagram.png`
+
+Processing pipeline:
+
+1. Query Postgres for uncaptionsed assets
+2. Fetch thumbnail via Immich API
+3. Run Florence-2 caption generation
+4. Apply identity overrides
+5. Update `asset_exif.description`
+
+---
+
+## Quickstart
+
+### 1. Clone
+
+```bash
+git clone https://github.com/mikesimone/immich-semantic-captioner.git
+cd immich-semantic-captioner
 ```
-Immich Postgres → candidate selection
-          ↓
-Immich API → thumbnail fetch
-          ↓
-Florence-2 (GPU or CPU)
-          ↓
-Caption cleanup + identity injection
-          ↓
-Immich API → description update
+
+### 2. Configure
+
+Copy environment template:
+
+```bash
+cp .env.example .env
+```
+
+Fill in:
+
+- IMMICH_URL
+- IMMICH_API_KEY
+- DB_PASSWORD
+
+### 3. Start
+
+```bash
+docker compose up -d --build
 ```
 
 ---
 
-## Identity Injection Logic
+## CPU-Only Mode
 
-Album names must follow:
+If you do not have a GPU:
 
-```
-NNN(.NNN)* - PersonName [optional text]
-```
+- Remove `gpus: all` from docker-compose.yml
+- Use CPU base image in Dockerfile
 
-Examples:
-
-```
-002.000 - Lydia
-002.002 - Lydia Being a Good Girl
-100.000.005 - Jen K
-```
-
-Injected identity:
-
-- First name
-- Or first name + last initial (if present)
-
-Identity is guaranteed to appear in the caption.
-
-Example:
-
-```
-Lydia: The image shows ...
-```
+Florence-2 will run slower but remains functional.
 
 ---
 
-## Database Changes
+## Database Impact
 
-Creates one additional table if not present:
+Creates one optional table:
 
-```
-captioner_skip
-```
+`captioner_skip`
 
-No other schema changes are made.
+Used to track assets that failed processing.
 
----
-
-## Reset All Captions
-
-⚠ WARNING: This overwrites all descriptions.
-
-```
-docker exec -i immich_postgres psql -U postgres -d immich -c "UPDATE asset_exif SET description='';"
-```
-
----
-
-## Performance Notes
-
-- OCR captions are faster than detailed captions.
-- GPU strongly recommended.
-- Uses thumbnails for speed.
-- HuggingFace cache stored in a Docker volume.
+No other schema modifications.
 
 ---
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT License
+
+---
+
+## Production Notes
+
+- Designed for private deployments
+- Overwrites existing descriptions
+- Intended for deterministic metadata enrichment
+
+---
+
 
