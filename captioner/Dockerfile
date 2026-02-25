@@ -21,4 +21,4 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # captioner.py is bind-mounted from docker-compose.yml:
 #   ./captioner/captioner.py:/app/captioner.py:ro
 
-CMD ["python", "/app/captioner.py"]
+CMD ["/opt/venv/bin/python", "/app/captioner.py"]
