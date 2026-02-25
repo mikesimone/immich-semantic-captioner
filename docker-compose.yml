@@ -1,0 +1,53 @@
+name: immich-semantic-captioner
+
+services:
+  immich-captioner:
+    container_name: immich_captioner
+    build:
+      context: ./captioner
+      args:
+        CUDA_BASE_IMAGE: ${CUDA_BASE_IMAGE}
+
+    environment:
+      # Immich API
+      - IMMICH_URL=${IMMICH_URL}
+      - IMMICH_API_KEY=${IMMICH_API_KEY}
+
+      # Batch behavior
+      - BATCH_SIZE=${BATCH_SIZE}
+      - SLEEP_SECONDS=${SLEEP_SECONDS}
+      - IDLE_SLEEP_SECONDS=${IDLE_SLEEP_SECONDS}
+      - MAX_CAPTION_CHARS=${MAX_CAPTION_CHARS}
+      - USER_AGENT=${USER_AGENT}
+
+      # Feature flags
+      - DRY_RUN=${DRY_RUN}
+      - CAPTION_VIDEOS=${CAPTION_VIDEOS}
+      - ENABLE_TAGS=${ENABLE_TAGS}
+
+      # Florence model
+      - FLORENCE_MODEL=${FLORENCE_MODEL}
+
+      # Postgres
+      - PGHOST=${PGHOST}
+      - PGPORT=${PGPORT}
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+
+      # Identity controls (still supported)
+      - PYTHONPATH=/opt/overrides
+      - IDENTITY_ALBUM_MAP=${IDENTITY_ALBUM_MAP}
+      - IDENTITY_NOUN_HINTS=${IDENTITY_NOUN_HINTS}
+      - IDENTITY_ENSURE_MODE=${IDENTITY_ENSURE_MODE}
+
+    gpus: all
+    restart: unless-stopped
+
+    volumes:
+      - captioner-hf-cache:/root/.cache/huggingface
+      - ./captioner/captioner.py:/app/captioner.py:ro
+      - ./captioner/overrides:/opt/overrides:ro
+
+volumes:
+  captioner-hf-cache:

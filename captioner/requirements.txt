@@ -1,0 +1,7 @@
+requests==2.32.3
+Pillow==10.4.0
+psycopg2-binary==2.9.9
+transformers==4.41.2
+torch
+einops
+timm
