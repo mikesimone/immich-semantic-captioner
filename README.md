@@ -254,7 +254,9 @@ This system:
   - "funny meme about work"
 
 ---
+## Important
 
+This project is not affiliated with [Immich](https://github.com/immich-app/immich)
 ## License
 
 MIT License. See `LICENSE`.
