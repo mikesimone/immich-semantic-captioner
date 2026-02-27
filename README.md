@@ -41,6 +41,7 @@ Edit `.env` and set:
 - `IMMICH_URL`
 - `IMMICH_API_KEY`
 - Postgres settings (`PGHOST`, `PGPASSWORD`, etc.)
+- USE_API_ONLY (default true): Set to 'true' for fully API-supported operation (recommended for most users). Set to 'false' only if you're comfortable with direct Postgres access and need maximum speed on large libraries.
 
 ### 3) Run (GPU mode)
 
@@ -205,7 +206,23 @@ No guessing. No heuristics.
 
 ## Database Changes
 
-Creates one additional table if not present:
+## API-Only Mode (Recommended / Default)
+
+By default, `USE_API_ONLY=true` — the tool scans for uncaptioned assets using paginated calls to Immich's `/search/metadata` endpoint (with `with_exif=true`).
+
+This is fully supported by Immich, requires no DB credentials, and avoids any risk from direct database access.
+
+Trade-off: Slower on very large libraries (full pagination through all assets), but safe and future-proof.
+
+To use direct DB mode (faster candidate discovery):
+- Set `USE_API_ONLY=false`
+- Ensure valid Postgres credentials are set
+- Be aware: Immich does not officially support direct DB reads; schema changes may break this.
+
+Direct DB mode is for advanced/power users only.
+
+
+If you disable API-only, it creates one additional table if not present:
 
 ```
 captioner_skip
@@ -219,11 +236,16 @@ No other schema changes are made.
 
 ## Reset All Captions
 
+⚠ **DANGER: This command wipes ALL descriptions in your Immich library!**  
+Only run this if you KNOW you want to zero them out and start captioning from scratch (e.g., after changing models or cleanup rules).
+
 ⚠ WARNING: This overwrites all descriptions.
 
 ```
 docker exec -i immich_postgres psql -U postgres -d immich -c "UPDATE asset_exif SET description='';"
 ```
+
+After running, restart the captioner container to begin re-processing everything.
 
 ---
 
