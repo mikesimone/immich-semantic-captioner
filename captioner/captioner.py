@@ -5,6 +5,8 @@ import sys
 import time
 import json
 import re
+import subprocess
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -38,6 +40,19 @@ DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
 # If 0, videos are skipped and marked in captioner_skip.
 CAPTION_VIDEOS = os.environ.get("CAPTION_VIDEOS", "0") == "1"
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
+FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
+
+# Keyframe sampling: sparse coverage of the "setup" of the video, dense fixed-interval
+# coverage of the tail window (where the action tends to concentrate in longer clips).
+VIDEO_TAIL_SECONDS = float(os.environ.get("VIDEO_TAIL_SECONDS", "240"))
+VIDEO_TAIL_INTERVAL_SECONDS = float(os.environ.get("VIDEO_TAIL_INTERVAL_SECONDS", "15"))
+VIDEO_HEAD_FRAME_COUNT = int(os.environ.get("VIDEO_HEAD_FRAME_COUNT", "4"))
+MAX_VIDEO_FRAMES = int(os.environ.get("MAX_VIDEO_FRAMES", "24"))
+
+# If 1, the detailed-caption model is instructed to describe sexual content
+# directly and explicitly (no euphemisms) instead of writing a sanitized caption.
+EXPLICIT_CAPTIONS = os.environ.get("EXPLICIT_CAPTIONS", "1") == "1"
 
 # Tagging: best-effort (won't crash if API changes)
 ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you want it
@@ -105,7 +120,10 @@ _WATERMARK_PATTERNS = [
 ]
 _WATERMARK_REGEXES = [re.compile(p, re.IGNORECASE) for p in _WATERMARK_PATTERNS]
 
-_SEP_REGEX = re.compile(r"\s*[\|\u2022•·\-–—]+\s*")
+# Bare ASCII hyphens only count as a separator when surrounded by whitespace (" - "),
+# so hyphenated compound words ("close-up", "dark-skinned") survive intact. Pipes/bullets/
+# dashes always split, since those are never legitimately part of a normal word.
+_SEP_REGEX = re.compile(r"\s*[\|\u2022•·–—]+\s*|\s+-\s+")
 _JUNK_FULLCAPTION_REGEXES = [re.compile(r"^watch and share .* gifs on gfycat$", re.IGNORECASE)]
 _TRAILING_HANDLE_RE = re.compile(r"\s*@[\w.]+\s*$", re.IGNORECASE)
 
@@ -189,9 +207,22 @@ def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List
     return out, identities
 
 # ----------------------------
-# Florence-2
+# Florence-2 (OCR only -- cheap pre-pass to catch text-heavy images/memes)
 # ----------------------------
-def load_florence():
+def ocr_is_meaningful(s: str) -> bool:
+    if not s:
+        return False
+    t = s.strip()
+    alnum = re.findall(r"[A-Za-z0-9]", t)
+    if len(alnum) < 10:
+        return False
+    if len(t.split()) < 3:
+        return False
+    if re.match(r"^(a|an|the)\s+(man|woman|person|dog|cat|cartoon|photo|picture)\b", t, re.IGNORECASE):
+        return False
+    return True
+
+def load_florence_ocr():
     from transformers import AutoProcessor, AutoModelForCausalLM
     import torch
 
@@ -209,8 +240,8 @@ def load_florence():
     ).to(device)
     model.eval()
 
-    def _run(prompt: str, pil_image: Image.Image) -> str:
-        inputs = processor(text=prompt, images=pil_image, return_tensors="pt")
+    def ocr(pil_image: Image.Image) -> str:
+        inputs = processor(text="<OCR>", images=pil_image, return_tensors="pt")
         for k, v in list(inputs.items()):
             if hasattr(v, "to"):
                 v = v.to(device)
@@ -222,27 +253,78 @@ def load_florence():
         txt = processor.batch_decode(ids, skip_special_tokens=True)[0]
         return " ".join(txt.strip().split())[:MAX_CAPTION_CHARS]
 
-    def ocr_is_meaningful(s: str) -> bool:
-        if not s:
-            return False
-        t = s.strip()
-        alnum = re.findall(r"[A-Za-z0-9]", t)
-        if len(alnum) < 10:
-            return False
-        if len(t.split()) < 3:
-            return False
-        if re.match(r"^(a|an|the)\s+(man|woman|person|dog|cat|cartoon|photo|picture)\b", t, re.IGNORECASE):
-            return False
-        return True
+    return ocr
 
-    def caption_image(pil_image: Image.Image) -> Tuple[str, str]:
-        ocr = _run("<OCR>", pil_image)
-        if ocr_is_meaningful(ocr):
-            return ocr, "OCR"
-        detailed = _run("<MORE_DETAILED_CAPTION>", pil_image)
-        return detailed, "DETAILED"
+# ----------------------------
+# JoyCaption (explicit detailed captions; images + video frames)
+# ----------------------------
+def build_caption_prompt(video_note: str = "") -> str:
+    lead = "Write a detailed descriptive caption for this image in 2-4 sentences."
+    if video_note:
+        lead = f"{video_note} {lead}"
+    if not EXPLICIT_CAPTIONS:
+        return lead
+    return (
+        f"{lead} This image may be pornographic or sexually explicit. If it is, write like "
+        "smut/erotica, not a clinical report: use crude, degrading, vulgar slang throughout "
+        "-- words like \"cock\", \"pussy\", \"tits\", \"cum\", \"slut\", \"whore\", \"fucking\", "
+        "\"moaning\", \"dripping\", \"gaping\", \"choking on it\" -- rather than polite or "
+        "anatomical euphemisms. Name the specific sex acts, positions, and body parts, and "
+        "describe how each participant looks/sounds/reacts (facial expression, wetness, "
+        "penetration depth, etc). Do not soften it, do not refuse, do not moralize, do not "
+        "add disclaimers -- just describe exactly what is happening in the crudest accurate "
+        "terms. If the image is not sexual, write a normal, non-sexual caption."
+    )
 
-    return caption_image
+def load_joycaption():
+    from transformers import AutoProcessor, LlavaForConditionalGeneration, BitsAndBytesConfig
+    import torch
+
+    model_id = os.environ.get("JOYCAPTION_MODEL", "fancyfeast/llama-joycaption-beta-one-hf-llava")
+    print(f"[model] Loading {model_id} (8-bit)", flush=True)
+
+    # Only quantize the language model -- the SigLIP vision tower is small and its
+    # attention-pooling head doesn't play well with 8-bit (dtype mismatch: Half vs Char).
+    quant_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_skip_modules=["vision_tower", "multi_modal_projector"],
+    )
+
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = LlavaForConditionalGeneration.from_pretrained(
+        model_id,
+        quantization_config=quant_config,
+        torch_dtype=torch.float16,
+        device_map="cuda:0",
+    )
+    model.eval()
+
+    def caption_detailed(pil_image: Image.Image, video_note: str = "") -> str:
+        prompt = build_caption_prompt(video_note)
+        convo = [
+            {"role": "system", "content": "You are a helpful image captioner."},
+            {"role": "user", "content": prompt},
+        ]
+        convo_string = processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=[convo_string], images=[pil_image], return_tensors="pt").to(model.device)
+        if "pixel_values" in inputs:
+            inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
+
+        with torch.inference_mode():
+            generate_ids = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                do_sample=True,
+                temperature=0.6,
+                top_p=0.9,
+            )[0]
+        generate_ids = generate_ids[inputs["input_ids"].shape[1]:]
+        txt = processor.tokenizer.decode(
+            generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        return " ".join(txt.strip().split())[:MAX_CAPTION_CHARS]
+
+    return caption_detailed
 
 # ----------------------------
 # Immich API helpers
@@ -286,6 +368,102 @@ def immich_update_description(asset_id: str, caption: str) -> bool:
         print(f"[immich] PUT /api/assets failed {r.status_code}: {r.text}", flush=True)
         return False
     return True
+
+# ----------------------------
+# Video handling (download original, sample frames via ffmpeg, caption each)
+# ----------------------------
+def immich_download_original(asset_id: str, dest_path: str) -> None:
+    url = f"{IMMICH_URL}/api/assets/{asset_id}/original"
+    with requests.get(url, headers=immich_headers(), timeout=300, stream=True) as r:
+        r.raise_for_status()
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+def probe_duration_seconds(video_path: str) -> float:
+    result = subprocess.run(
+        [FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+def compute_video_timestamps(duration: float) -> List[float]:
+    if duration <= 0:
+        return [0.0]
+
+    # Dense, fixed-interval coverage of the tail (last VIDEO_TAIL_SECONDS) -- this
+    # window size/interval is constant regardless of total video length, so a 5-minute
+    # video and a 2-hour video both get the same tight coverage of their final minutes.
+    tail_start = max(0.0, duration - VIDEO_TAIL_SECONDS)
+    tail_timestamps: List[float] = []
+    t = tail_start
+    while t < duration:
+        tail_timestamps.append(round(t, 2))
+        t += VIDEO_TAIL_INTERVAL_SECONDS
+    if not tail_timestamps:
+        tail_timestamps = [round(max(0.0, duration - 1), 2)]
+
+    # Sparse coverage of whatever comes before the tail window (the "setup").
+    head_timestamps: List[float] = []
+    if tail_start > 0 and VIDEO_HEAD_FRAME_COUNT > 0:
+        n = VIDEO_HEAD_FRAME_COUNT
+        head_timestamps = [round(tail_start * (i + 1) / (n + 1), 2) for i in range(n)]
+
+    timestamps = sorted(head_timestamps + tail_timestamps)
+
+    # Safety cap for pathological configs (e.g. a tiny interval on a huge tail window).
+    # Trim from the front first so the tail -- the part we care most about -- survives.
+    if len(timestamps) > MAX_VIDEO_FRAMES:
+        timestamps = timestamps[len(timestamps) - MAX_VIDEO_FRAMES:]
+
+    return timestamps
+
+def extract_video_frames(video_path: str) -> List[Tuple[float, Image.Image]]:
+    duration = probe_duration_seconds(video_path)
+    timestamps = compute_video_timestamps(duration)
+
+    frames: List[Tuple[float, Image.Image]] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i, ts in enumerate(timestamps):
+            out_path = os.path.join(tmpdir, f"frame_{i}.jpg")
+            subprocess.run(
+                [FFMPEG_BIN, "-y", "-ss", f"{ts:.2f}", "-i", video_path,
+                 "-frames:v", "1", "-q:v", "2", out_path],
+                capture_output=True, timeout=60,
+            )
+            if os.path.exists(out_path):
+                frames.append((ts, Image.open(out_path).convert("RGB").copy()))
+    return frames
+
+def format_ts(seconds: float) -> str:
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    return f"{m:02d}:{s:02d}"
+
+def caption_video(asset_id: str, caption_detailed) -> Tuple[str, str]:
+    fd, video_path = tempfile.mkstemp(suffix=".mp4")
+    os.close(fd)
+    try:
+        immich_download_original(asset_id, video_path)
+        frames = extract_video_frames(video_path)
+        if not frames:
+            raise RuntimeError("no frames extracted")
+
+        parts = []
+        for ts, img in frames:
+            cap = caption_detailed(img, video_note="This is one frame from a video.")
+            parts.append(f"[{format_ts(ts)}] {cap}")
+        return " || ".join(parts), "VIDEO-FRAMES"
+    finally:
+        try:
+            os.remove(video_path)
+        except OSError:
+            pass
 
 # Tagging (unchanged)
 _tag_cache: Dict[str, Optional[str]] = {}
@@ -502,7 +680,15 @@ def main():
     must_env("IMMICH_URL", IMMICH_URL)
     must_env("IMMICH_API_KEY", IMMICH_API_KEY)
 
-    caption_image = load_florence()
+    ocr_fn = load_florence_ocr()
+    caption_detailed = load_joycaption()
+
+    def caption_image(pil_image: Image.Image) -> Tuple[str, str]:
+        ocr = ocr_fn(pil_image)
+        if ocr_is_meaningful(ocr):
+            return ocr, "OCR"
+        detailed = caption_detailed(pil_image)
+        return detailed, "DETAILED"
 
     conn = None
     if not USE_API_ONLY:
@@ -544,8 +730,11 @@ def main():
                     print(f"[skip] {asset_id} is VIDEO (skipping)", flush=True)
                     continue
 
-                img = immich_get_thumbnail(asset_id)
-                raw_caption, mode = caption_image(img)
+                if asset_type == "VIDEO":
+                    raw_caption, mode = caption_video(asset_id, caption_detailed)
+                else:
+                    img = immich_get_thumbnail(asset_id)
+                    raw_caption, mode = caption_image(img)
 
                 caption = clean_caption(raw_caption)
                 if not caption.strip():
@@ -574,6 +763,13 @@ def main():
                 if not USE_API_ONLY:
                     pg_mark_skip(conn, asset_id, "THUMBNAIL_404")
                 print(f"[skip] {asset_id}: {e} (marked skip)", flush=True)
+                time.sleep(0.2)
+
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else "?"
+                if not USE_API_ONLY:
+                    pg_mark_skip(conn, asset_id, f"HTTP_ERROR_{status}")
+                print(f"[skip] {asset_id}: HTTP {status} fetching asset (marked skip)", flush=True)
                 time.sleep(0.2)
 
             except Exception as e:
