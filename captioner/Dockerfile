@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-pip git ca-certificates \
+    python3 python3-venv python3-pip git ca-certificates ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/venv
