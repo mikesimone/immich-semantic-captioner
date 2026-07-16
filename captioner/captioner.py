@@ -87,6 +87,10 @@ DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "120"))
 SINGLE_CREAMPIE_ALBUM_ID = os.environ.get("SINGLE_CREAMPIE_ALBUM_ID", "3a22144e-143c-4f43-a508-8b3f7fadbcb5")
 MULTIPLE_CREAMPIE_ALBUM_ID = os.environ.get("MULTIPLE_CREAMPIE_ALBUM_ID", "e7479905-44b5-42ca-86d0-aaf8fb7c36e3")
 
+# Same idea for furry/anthro content -- any image or video whose caption indicates it,
+# regardless of existing album, gets added here too.
+FURRY_ALBUM_ID = os.environ.get("FURRY_ALBUM_ID", "b135f926-dd5b-4230-aa05-32bbdb2cf315")
+
 # Tagging: best-effort (won't crash if API changes)
 ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you want it
 
@@ -392,7 +396,10 @@ _COMMON_CAPTION_RULES = (
     "there's other text baked into the image itself (a meme caption, speech bubble, etc.) that "
     "is NOT a watermark or site name, transcribe it.\n"
     "- If this is illustrated/animated art rather than a photo of a real person, and you "
-    "recognize the character as a specific fictional or franchise character, name them.\n"
+    "recognize the character as a specific fictional or franchise character, name them -- "
+    "but ALSO always state their species/type explicitly (e.g. \"anthropomorphic dog\", "
+    "\"anthro fox\", \"furry\") even when the name alone would tell a fan who they are. "
+    "Never rely on the name by itself to convey that.\n"
     "- Where it fits, use the same terms e621/Rule34 taggers use for acts, kinks, species, or "
     "fetish elements (e.g. \"paizuri\", \"gangbang\", \"bukkake\", \"futanari\") instead of "
     "vaguer plain-English phrasing.\n"
@@ -767,6 +774,9 @@ def caption_video(
         if not frames:
             raise RuntimeError("no frames extracted")
 
+        _, tag_frame = frames[len(frames) // 2]
+        generate_and_apply_e621_tags(asset_id, tag_frame, caption_detailed)
+
         if dense:
             return _caption_video_dense(frames, caption_detailed, person_names)
 
@@ -839,6 +849,38 @@ def immich_ensure_tag_id(tag_value: str) -> Optional[str]:
         print(f"[tag] ensure_tag_id({tag_value}) failed: {e}", flush=True)
         _tag_cache[tag_value] = None
         return None
+
+_E621_TAGS_PROMPT = (
+    "List e621/Rule34-style tags for this image: species, body type, sex acts, kinks, "
+    "objects, clothing, and any other elements relevant to search. Answer with ONLY a "
+    "comma-separated list of short lowercase tags (e.g. \"anthro, elephant, breasts, "
+    "bondage, rope\") -- no sentences, no numbering, no other text. If nothing tag-worthy "
+    "applies, answer exactly: none"
+)
+
+def _parse_e621_tags(text: str) -> List[str]:
+    if not text or text.strip().lower().startswith("none"):
+        return []
+    seen = set()
+    tags: List[str] = []
+    for raw in text.split(","):
+        t = raw.strip().lower().strip(".")
+        if not t or len(t) > 40 or t in seen:
+            continue
+        seen.add(t)
+        tags.append(t)
+    return tags[:20]
+
+def generate_and_apply_e621_tags(asset_id: str, pil_image: Image.Image, caption_detailed) -> None:
+    if not ENABLE_TAGS:
+        return
+    try:
+        raw = caption_detailed(pil_image, prompt_override=_E621_TAGS_PROMPT, max_new_tokens=120)
+        tags = _parse_e621_tags(raw)
+        if tags:
+            immich_apply_tags(asset_id, tags)
+    except Exception as e:
+        print(f"[e621-tags] failed for {asset_id}: {e}", flush=True)
 
 def immich_apply_tags(asset_id: str, tag_values: List[str]) -> None:
     if not ENABLE_TAGS:
@@ -1102,6 +1144,7 @@ def main():
                 else:
                     img = immich_get_thumbnail(asset_id)
                     raw_caption, mode = caption_image(img, person_names=person_names)
+                    generate_and_apply_e621_tags(asset_id, img, caption_detailed)
 
                 caption = clean_caption(raw_caption)
                 if not caption.strip():
@@ -1131,7 +1174,7 @@ def main():
                                 immich_add_to_album(asset_id, target)
 
                     if _FURRY_TRIGGER_RE.search(caption):
-                        immich_apply_tags(asset_id, ["furry"])
+                        immich_add_to_album(asset_id, FURRY_ALBUM_ID)
                 else:
                     print(f"[fail] {asset_id} update failed", flush=True)
 
