@@ -645,20 +645,18 @@ def format_ts(seconds: float) -> str:
     s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
 
-_CREAMPIE_RE = re.compile(r"creampie", re.IGNORECASE)
-
-def count_creampie_events(frame_captions: List[Tuple[float, str]]) -> Tuple[int, List[str]]:
-    # frame_captions is already in chronological sample order. Each frame is captioned
-    # independently, so a "creampie" mention marks the pull-out-with-fresh-cum moment for
-    # that single frame -- there's no cross-frame memory for the model to count events
-    # itself. Count a new event on every transition from "not currently a creampie moment"
-    # to "creampie moment": a run of consecutive flagged frames is one event, and as long
-    # as at least one frame in between shows a fresh insertion (not flagged) rather than
-    # lingering residual cum, back-to-back events stay separated instead of merging.
+def count_creampie_events(frame_flags: List[Tuple[float, bool]]) -> Tuple[int, List[str]]:
+    # frame_flags is already in chronological sample order, one bool per frame: is cum
+    # currently visible in/around her pussy or ass. A single still frame can't show the
+    # *instant* of pulling out -- that's a motion, not a static visual state -- so we don't
+    # ask the model to recognize that moment directly. Instead we count every transition
+    # from "not visible" to "visible" across the sampled sequence: a run of consecutive
+    # flagged frames is one event, and as long as at least one frame in between shows a
+    # fresh insertion (not flagged) rather than lingering cum, back-to-back events stay
+    # separated instead of merging.
     event_starts = []
     was_flagged = False
-    for ts, cap in frame_captions:
-        is_flagged = bool(_CREAMPIE_RE.search(cap))
+    for ts, is_flagged in frame_flags:
         if is_flagged and not was_flagged:
             event_starts.append(format_ts(ts))
         was_flagged = is_flagged
@@ -668,43 +666,44 @@ def count_creampie_events(frame_captions: List[Tuple[float, str]]) -> Tuple[int,
 # cheap per-frame signal for counting, plus one detailed description of the woman from a
 # single representative frame. This short classification prompt drives that per-frame pass.
 _DENSE_SIGNAL_PROMPT = (
-    "Look at this single video frame and answer with ONLY ONE short line, no extra words.\n"
-    "First, if this frame is just a text card, logo, watermark screen, loading screen, or "
-    "otherwise doesn't show a person at all, say \"TITLECARD\" and stop there.\n"
-    "Otherwise say exactly one of:\n"
-    "\"CREAMPIE\" -- a cock/toy has just been pulled out and fresh cum is visibly dumping "
-    "out right now.\n"
-    "\"INSERTED\" -- a cock/toy is currently inside her (ongoing penetration, no pull-out "
-    "happening right now).\n"
-    "\"CUM-VISIBLE\" -- cum is visible but nothing is currently being inserted or pulled "
-    "out (a lull between events).\n"
-    "\"NONE\" -- none of the above apply to this frame.\n"
-    "Then, on the same line, add \" BONDAGE\" if rope, cuffs, a collar/leash, or other "
-    "restraints are visible on her in this frame, otherwise add \" NO-BONDAGE\"."
+    "Look at this single video frame. Answer with ONLY a short tag, nothing else -- no "
+    "sentences, no explanations, no punctuation beyond what's shown below.\n"
+    "If this frame is just a text card, logo, watermark screen, or loading screen with no "
+    "person shown, answer exactly: TITLECARD\n"
+    "Otherwise answer with exactly one of these words: CUM (cum/jizz is currently visible "
+    "in, on, or dripping from her pussy or asshole right now, regardless of whether "
+    "penetration is also happening in this same frame) or NOCUM (no such cum is currently "
+    "visible there -- whether because nothing has happened yet, she's mid-penetration with "
+    "no visible fluid, or it's been wiped/moved away since).\n"
+    "Then a space, then exactly one of: TIED (she is physically bound/restrained with rope, "
+    "cuffs, a collar-and-leash, or similar restraint gear that immobilizes her -- a hand or "
+    "another body part simply gripping/holding her during sex does NOT count as TIED) or "
+    "FREE (not restrained).\n"
+    "Example full answers: \"CUM FREE\" or \"NOCUM TIED\". Nothing else."
 )
 
 def _parse_dense_signal(text: str) -> Tuple[bool, bool, bool]:
     t = text.upper()
     is_titlecard = "TITLECARD" in t
-    is_creampie = "CREAMPIE" in t
-    is_bondage = "BONDAGE" in t and "NO-BONDAGE" not in t and "NO BONDAGE" not in t
-    return is_titlecard, is_creampie, is_bondage
+    is_cum = bool(re.search(r"\bCUM\b", t))
+    is_tied = bool(re.search(r"\bTIED\b", t))
+    return is_titlecard, is_cum, is_tied
 
 def _caption_video_dense(
     frames: List[Tuple[float, Image.Image]],
     caption_detailed,
     person_names: Optional[List[str]],
 ) -> Tuple[str, str]:
-    creampie_flags: List[Tuple[float, str]] = []
-    bondage_any = False
+    creampie_flags: List[Tuple[float, bool]] = []
+    tied_any = False
     person_frames: List[Tuple[float, Image.Image]] = []
 
     for ts, img in frames:
-        signal = caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=12)
-        is_titlecard, is_creampie, is_bondage = _parse_dense_signal(signal)
+        signal = caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=16)
+        is_titlecard, is_cum, is_tied = _parse_dense_signal(signal)
         print(f"[dense-debug] {format_ts(ts)}: {signal!r}", flush=True)
-        creampie_flags.append((ts, "CREAMPIE" if is_creampie else ""))
-        bondage_any = bondage_any or is_bondage
+        creampie_flags.append((ts, is_cum))
+        tied_any = tied_any or is_tied
         if not is_titlecard:
             person_frames.append((ts, img))
 
@@ -715,14 +714,18 @@ def _caption_video_dense(
     # a fixed "just take the middle frame" would sometimes land on an intro card instead.
     candidates = person_frames or frames
     _, desc_img = candidates[len(candidates) // 2]
-    woman_desc = caption_detailed(desc_img, video_note="This is one frame from a video.", person_names=person_names)
+    desc_note = (
+        "This is one frame from a video. There may be more than one woman in this video -- "
+        "if more than one is visible in this specific frame, describe each of them."
+    )
+    woman_desc = caption_detailed(desc_img, video_note=desc_note, person_names=person_names)
 
     plural = "creampie" if count == 1 else "creampies"
     summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})" if count else "SUMMARY: 0 creampies detected"
 
     parts = [summary, woman_desc]
-    if bondage_any:
-        parts.append("Bondage/restraints are visible at some point in this video.")
+    if tied_any:
+        parts.append("She is tied up/restrained at some point in this video.")
 
     return " || ".join(parts), "VIDEO-FRAMES-DENSE"
 
