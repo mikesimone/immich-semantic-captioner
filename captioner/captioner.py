@@ -258,22 +258,44 @@ def load_florence_ocr():
 # ----------------------------
 # JoyCaption (explicit detailed captions; images + video frames)
 # ----------------------------
-def build_caption_prompt(video_note: str = "") -> str:
-    lead = "Write a detailed descriptive caption for this image in 2-4 sentences."
-    if video_note:
-        lead = f"{video_note} {lead}"
-    if not EXPLICIT_CAPTIONS:
-        return lead
+def _name_instruction(person_names: Optional[List[str]]) -> str:
+    if not person_names:
+        return ""
+    who = " and ".join(person_names)
+    verb = "is" if len(person_names) == 1 else "are"
+    quoted = " / ".join(f"\"{n}\"" for n in person_names)
     return (
-        f"{lead} This image may be pornographic or sexually explicit. If it is, write like "
-        "smut/erotica, not a clinical report: use crude, degrading, vulgar slang throughout "
-        "-- words like \"cock\", \"pussy\", \"tits\", \"cum\", \"slut\", \"whore\", \"fucking\", "
-        "\"moaning\", \"dripping\", \"gaping\", \"choking on it\" -- rather than polite or "
-        "anatomical euphemisms. Name the specific sex acts, positions, and body parts, and "
-        "describe how each participant looks/sounds/reacts (facial expression, wetness, "
-        "penetration depth, etc). Do not soften it, do not refuse, do not moralize, do not "
-        "add disclaimers -- just describe exactly what is happening in the crudest accurate "
-        "terms. If the image is not sexual, write a normal, non-sexual caption."
+        f"\n\n{who} {verb} known by name -- always refer to them as {quoted}. "
+        "Never call them \"slut\", \"whore\", or a generic \"woman\"/\"man\"/\"girl\"/\"guy\" "
+        "-- use their actual name instead, even when the rest of the description is explicit "
+        "and crude."
+    )
+
+def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]] = None) -> str:
+    if not EXPLICIT_CAPTIONS:
+        lead = "Write a detailed descriptive caption for this image in 2-4 sentences."
+        return f"{video_note} {lead}" if video_note else lead
+
+    subject = "this video frame" if video_note else "this image"
+    gate = f"Look carefully at {subject} and decide: does it actually depict nudity, sex acts, or genitals?"
+    if video_note:
+        gate = f"{video_note} {gate}"
+
+    return (
+        f"{gate}\n"
+        "If NO -- it is a normal, non-sexual image -- write a normal, detailed descriptive "
+        "caption in 2-4 sentences. Do not mention sex, nudity, genitals, or bodily fluids at "
+        "all in that case, even in passing or as a comparison.\n"
+        "If YES -- it genuinely shows nudity or sexual content -- write like smut/erotica, not "
+        "a clinical report: use crude, degrading, vulgar slang throughout (e.g. \"cock\", "
+        "\"pussy\", \"tits\", \"cum\", \"slut\", \"whore\", \"fucking\", \"moaning\", "
+        "\"dripping\", \"gaping\", \"choking on it\") rather than polite or anatomical "
+        "euphemisms. Name the specific sex acts, positions, and body parts, and describe how "
+        "each participant looks/sounds/reacts. Do not soften it, do not refuse, do not "
+        "moralize, do not add disclaimers.\n"
+        "Only describe what is actually visible in this specific frame/image -- never invent "
+        "sexual content, fluids, or acts that aren't really there."
+        + _name_instruction(person_names)
     )
 
 def load_joycaption():
@@ -299,8 +321,8 @@ def load_joycaption():
     )
     model.eval()
 
-    def caption_detailed(pil_image: Image.Image, video_note: str = "") -> str:
-        prompt = build_caption_prompt(video_note)
+    def caption_detailed(pil_image: Image.Image, video_note: str = "", person_names: Optional[List[str]] = None) -> str:
+        prompt = build_caption_prompt(video_note, person_names)
         convo = [
             {"role": "system", "content": "You are a helpful image captioner."},
             {"role": "user", "content": prompt},
@@ -315,7 +337,7 @@ def load_joycaption():
                 **inputs,
                 max_new_tokens=256,
                 do_sample=True,
-                temperature=0.6,
+                temperature=0.5,
                 top_p=0.9,
             )[0]
         generate_ids = generate_ids[inputs["input_ids"].shape[1]:]
@@ -445,7 +467,7 @@ def format_ts(seconds: float) -> str:
     s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
 
-def caption_video(asset_id: str, caption_detailed) -> Tuple[str, str]:
+def caption_video(asset_id: str, caption_detailed, person_names: Optional[List[str]] = None) -> Tuple[str, str]:
     fd, video_path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
     try:
@@ -456,7 +478,7 @@ def caption_video(asset_id: str, caption_detailed) -> Tuple[str, str]:
 
         parts = []
         for ts, img in frames:
-            cap = caption_detailed(img, video_note="This is one frame from a video.")
+            cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
             parts.append(f"[{format_ts(ts)}] {cap}")
         return " || ".join(parts), "VIDEO-FRAMES"
     finally:
@@ -683,11 +705,11 @@ def main():
     ocr_fn = load_florence_ocr()
     caption_detailed = load_joycaption()
 
-    def caption_image(pil_image: Image.Image) -> Tuple[str, str]:
+    def caption_image(pil_image: Image.Image, person_names: Optional[List[str]] = None) -> Tuple[str, str]:
         ocr = ocr_fn(pil_image)
+        detailed = caption_detailed(pil_image, person_names=person_names)
         if ocr_is_meaningful(ocr):
-            return ocr, "OCR"
-        detailed = caption_detailed(pil_image)
+            return f"{ocr.strip()} | {detailed.strip()}", "OCR+DETAILED"
         return detailed, "DETAILED"
 
     conn = None
@@ -730,11 +752,13 @@ def main():
                     print(f"[skip] {asset_id} is VIDEO (skipping)", flush=True)
                     continue
 
+                person_names = extract_identities_from_albums(albums)
+
                 if asset_type == "VIDEO":
-                    raw_caption, mode = caption_video(asset_id, caption_detailed)
+                    raw_caption, mode = caption_video(asset_id, caption_detailed, person_names=person_names)
                 else:
                     img = immich_get_thumbnail(asset_id)
-                    raw_caption, mode = caption_image(img)
+                    raw_caption, mode = caption_image(img, person_names=person_names)
 
                 caption = clean_caption(raw_caption)
                 if not caption.strip():
