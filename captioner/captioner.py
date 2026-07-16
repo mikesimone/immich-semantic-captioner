@@ -409,6 +409,13 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         "\"slutty\", or similar labels anywhere in the caption -- they describe nothing and are "
         "useless for search. Do not soften the sexual content, do not refuse, do not moralize, "
         "do not add disclaimers, and do not use polite euphemisms.\n"
+        "For every person, explicitly state what is bare vs. covered (e.g. \"topless\", \"her "
+        "tit is hanging out of her top\", \"fully nude\", \"panties pulled aside\"). Don't just "
+        "describe the clothing/outfit and leave nudity implied -- if she's wearing a corset but "
+        "her tits are hanging out over the top of it, say that plainly instead of just noting "
+        "the corset. Partial nudity while otherwise dressed is common here and must always be "
+        "called out directly, not hinted at through phrases like \"emphasizing her breasts\" or "
+        "\"accentuating her figure\".\n"
         "Only describe what is actually visible in this specific frame/image -- never invent "
         "sexual content, fluids, or acts that aren't really there."
         + _name_instruction(person_names)
