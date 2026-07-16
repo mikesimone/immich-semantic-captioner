@@ -54,6 +54,22 @@ MAX_VIDEO_FRAMES = int(os.environ.get("MAX_VIDEO_FRAMES", "24"))
 # directly and explicitly (no euphemisms) instead of writing a sanitized caption.
 EXPLICIT_CAPTIONS = os.environ.get("EXPLICIT_CAPTIONS", "1") == "1"
 
+# Sampling knobs for JoyCaption generation. Higher temperature = more varied phrasing
+# (helps avoid the model looping on the same few words like "slutty"/"smutty").
+JOYCAPTION_TEMPERATURE = float(os.environ.get("JOYCAPTION_TEMPERATURE", "0.75"))
+JOYCAPTION_REPETITION_PENALTY = float(os.environ.get("JOYCAPTION_REPETITION_PENALTY", "1.15"))
+
+# Albums whose videos get dense, uniform-interval frame sampling across the whole
+# clip instead of head-sparse/tail-dense -- for compilation-style videos where multiple
+# distinct events (e.g. creampies) can occur anywhere, not just near the end.
+DENSE_SAMPLING_ALBUM_KEYWORDS = os.environ.get("DENSE_SAMPLING_ALBUM_KEYWORDS", "creampie")
+DENSE_INTERVAL_SECONDS = float(os.environ.get("DENSE_INTERVAL_SECONDS", "8"))
+DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "60"))
+
+# Per-frame "creampie" mentions within this many seconds of each other are treated as
+# the same event rather than double-counted.
+CREAMPIE_EVENT_GAP_SECONDS = float(os.environ.get("CREAMPIE_EVENT_GAP_SECONDS", "20"))
+
 # Tagging: best-effort (won't crash if API changes)
 ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you want it
 
@@ -127,6 +143,26 @@ _SEP_REGEX = re.compile(r"\s*[\|\u2022•·–—]+\s*|\s+-\s+")
 _JUNK_FULLCAPTION_REGEXES = [re.compile(r"^watch and share .* gifs on gfycat$", re.IGNORECASE)]
 _TRAILING_HANDLE_RE = re.compile(r"\s*@[\w.]+\s*$", re.IGNORECASE)
 
+# Backstop for when the model narrates a watermark/site-name despite being told not to
+# (e.g. "The watermark 'Princess69.com' is in the top right corner") -- drop the whole
+# sentence rather than leave dangling site names in an otherwise-useful caption.
+_WATERMARK_MENTION_RE = re.compile(r"[^.]*\bwatermarks?\b[^.]*\.?", re.IGNORECASE)
+
+# Backstop for the model opening with meta-commentary about the caption itself instead of
+# describing the image (e.g. "A smutty, degrading caption for the image: ...").
+_META_PREAMBLE_RE = re.compile(
+    r"^(a|an)\s+[\w,\s]{0,40}\bcaption\b[\w\s]{0,20}\b(for|of)\s+(this|the)\s+"
+    r"(image|video|photo|frame)[^:]{0,10}:\s*",
+    re.IGNORECASE,
+)
+
+# Backstop for generic insult-labels ("slut", "whore", "slutty", "smutty") that carry no
+# searchable information -- strip the adjective form and swap the noun form for something
+# neutral rather than leaving a dangling article ("a " with nothing after it).
+_BANNED_LABEL_PHRASE_RE = re.compile(r"\b(a|an|the)\s+(?:slutty|smutty)\s+", re.IGNORECASE)
+_BANNED_NOUN_RE = re.compile(r"\b(?:sluts?|whores?)\b", re.IGNORECASE)
+_BANNED_ADJ_RE = re.compile(r"\b(?:slutty|smutty)\b\s*", re.IGNORECASE)
+
 def clean_caption(raw: str) -> str:
     if not raw:
         return ""
@@ -134,6 +170,11 @@ def clean_caption(raw: str) -> str:
     for r in _JUNK_FULLCAPTION_REGEXES:
         if r.match(s):
             return ""
+    s = _META_PREAMBLE_RE.sub("", s).strip()
+    s = _WATERMARK_MENTION_RE.sub("", s).strip()
+    s = _BANNED_LABEL_PHRASE_RE.sub(lambda m: f"{m.group(1)} ", s)
+    s = _BANNED_NOUN_RE.sub("woman", s)
+    s = _BANNED_ADJ_RE.sub("", s)
     s = _TRAILING_HANDLE_RE.sub("", s).strip()
     parts = [p.strip() for p in _SEP_REGEX.split(s) if p.strip()]
     if not parts:
@@ -156,6 +197,8 @@ def clean_caption(raw: str) -> str:
             cleaned_parts.append(q)
     out = " | ".join(cleaned_parts).strip()
     out = _WS_REGEX.sub(" ", out).strip()
+    if out:
+        out = out[0].upper() + out[1:]
     return out[:MAX_CAPTION_CHARS]
 
 # ----------------------------
@@ -265,10 +308,9 @@ def _name_instruction(person_names: Optional[List[str]]) -> str:
     verb = "is" if len(person_names) == 1 else "are"
     quoted = " / ".join(f"\"{n}\"" for n in person_names)
     return (
-        f"\n\n{who} {verb} known by name -- always refer to them as {quoted}. "
-        "Never call them \"slut\", \"whore\", or a generic \"woman\"/\"man\"/\"girl\"/\"guy\" "
-        "-- use their actual name instead, even when the rest of the description is explicit "
-        "and crude."
+        f"\n\n{who} {verb} known by name -- always refer to them as {quoted} instead of "
+        "\"the woman\"/\"the man\"/\"the girl\"/\"the guy\", even when the rest of the "
+        "description is explicit."
     )
 
 def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]] = None) -> str:
@@ -286,13 +328,23 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         "If NO -- it is a normal, non-sexual image -- write a normal, detailed descriptive "
         "caption in 2-4 sentences. Do not mention sex, nudity, genitals, or bodily fluids at "
         "all in that case, even in passing or as a comparison.\n"
-        "If YES -- it genuinely shows nudity or sexual content -- write like smut/erotica, not "
-        "a clinical report: use crude, degrading, vulgar slang throughout (e.g. \"cock\", "
-        "\"pussy\", \"tits\", \"cum\", \"slut\", \"whore\", \"fucking\", \"moaning\", "
-        "\"dripping\", \"gaping\", \"choking on it\") rather than polite or anatomical "
-        "euphemisms. Name the specific sex acts, positions, and body parts, and describe how "
-        "each participant looks/sounds/reacts. Do not soften it, do not refuse, do not "
+        "If YES -- it genuinely shows nudity or sexual content -- write a detailed, explicit "
+        "caption whose whole purpose is to be searched later, so every sentence has to carry "
+        "real information. Use direct anatomical and sexual vocabulary (e.g. \"cock\", "
+        "\"pussy\", \"tits\", \"cum\", \"creampie\", \"fucking\", \"moaning\", \"dripping\", "
+        "\"gaping\") rather than clinical euphemisms, and name the specific sex acts, "
+        "positions, and body parts involved. Describe the people the same way you would if "
+        "this were not sexual -- hair color/style, build, skin tone, and other visible "
+        "features -- not with generic insults. Never use \"slut\", \"whore\", \"smutty\", "
+        "\"slutty\", or similar labels anywhere in the caption -- they describe nothing and "
+        "are useless for search. Do not soften the sexual content, do not refuse, do not "
         "moralize, do not add disclaimers.\n"
+        "Do not open with a meta-description of the caption itself -- never start with "
+        "phrases like \"A smutty caption for...\", \"An explicit image of...\", or "
+        "\"Caption:\". Start directly with what is actually in the frame.\n"
+        "Completely ignore any watermarks, logos, site names, or text overlays burned into "
+        "the image -- never mention them, quote them, or describe where they sit in the "
+        "frame; they are not part of the scene.\n"
         "Only describe what is actually visible in this specific frame/image -- never invent "
         "sexual content, fluids, or acts that aren't really there."
         + _name_instruction(person_names)
@@ -337,8 +389,9 @@ def load_joycaption():
                 **inputs,
                 max_new_tokens=256,
                 do_sample=True,
-                temperature=0.5,
+                temperature=JOYCAPTION_TEMPERATURE,
                 top_p=0.9,
+                repetition_penalty=JOYCAPTION_REPETITION_PENALTY,
             )[0]
         generate_ids = generate_ids[inputs["input_ids"].shape[1]:]
         txt = processor.tokenizer.decode(
@@ -445,9 +498,34 @@ def compute_video_timestamps(duration: float) -> List[float]:
 
     return timestamps
 
-def extract_video_frames(video_path: str) -> List[Tuple[float, Image.Image]]:
+def compute_dense_timestamps(duration: float) -> List[float]:
+    if duration <= 0:
+        return [0.0]
+    timestamps: List[float] = []
+    t = 0.0
+    while t < duration:
+        timestamps.append(round(t, 2))
+        t += DENSE_INTERVAL_SECONDS
+    if len(timestamps) > DENSE_MAX_VIDEO_FRAMES:
+        # Thin evenly across the full duration rather than truncating -- for a dense
+        # scan we care about coverage of the whole clip, not just one end of it.
+        step = len(timestamps) / DENSE_MAX_VIDEO_FRAMES
+        timestamps = [timestamps[int(i * step)] for i in range(DENSE_MAX_VIDEO_FRAMES)]
+    return timestamps
+
+def is_dense_sampling_album(albums: List[str]) -> bool:
+    keywords = [k.strip().lower() for k in DENSE_SAMPLING_ALBUM_KEYWORDS.split(",") if k.strip()]
+    if not keywords:
+        return False
+    for album in albums or []:
+        al = album.lower()
+        if any(kw in al for kw in keywords):
+            return True
+    return False
+
+def extract_video_frames(video_path: str, dense: bool = False) -> List[Tuple[float, Image.Image]]:
     duration = probe_duration_seconds(video_path)
-    timestamps = compute_video_timestamps(duration)
+    timestamps = compute_dense_timestamps(duration) if dense else compute_video_timestamps(duration)
 
     frames: List[Tuple[float, Image.Image]] = []
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -467,20 +545,47 @@ def format_ts(seconds: float) -> str:
     s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
 
-def caption_video(asset_id: str, caption_detailed, person_names: Optional[List[str]] = None) -> Tuple[str, str]:
+_CREAMPIE_RE = re.compile(r"creampie", re.IGNORECASE)
+
+def count_creampie_events(frame_captions: List[Tuple[float, str]]) -> Tuple[int, List[str]]:
+    hits = sorted(ts for ts, cap in frame_captions if _CREAMPIE_RE.search(cap))
+    if not hits:
+        return 0, []
+    clusters = [[hits[0]]]
+    for ts in hits[1:]:
+        if ts - clusters[-1][-1] <= CREAMPIE_EVENT_GAP_SECONDS:
+            clusters[-1].append(ts)
+        else:
+            clusters.append([ts])
+    return len(clusters), [format_ts(c[0]) for c in clusters]
+
+def caption_video(
+    asset_id: str,
+    caption_detailed,
+    person_names: Optional[List[str]] = None,
+    dense: bool = False,
+) -> Tuple[str, str]:
     fd, video_path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
     try:
         immich_download_original(asset_id, video_path)
-        frames = extract_video_frames(video_path)
+        frames = extract_video_frames(video_path, dense=dense)
         if not frames:
             raise RuntimeError("no frames extracted")
 
         parts = []
+        frame_captions: List[Tuple[float, str]] = []
         for ts, img in frames:
             cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
             parts.append(f"[{format_ts(ts)}] {cap}")
-        return " || ".join(parts), "VIDEO-FRAMES"
+            frame_captions.append((ts, cap))
+
+        count, event_times = count_creampie_events(frame_captions)
+        if count >= 2:
+            parts.append(f"SUMMARY: at least {count} separate creampies visible (~{', '.join(event_times)})")
+
+        mode = "VIDEO-FRAMES-DENSE" if dense else "VIDEO-FRAMES"
+        return " || ".join(parts), mode
     finally:
         try:
             os.remove(video_path)
@@ -755,7 +860,10 @@ def main():
                 person_names = extract_identities_from_albums(albums)
 
                 if asset_type == "VIDEO":
-                    raw_caption, mode = caption_video(asset_id, caption_detailed, person_names=person_names)
+                    dense = is_dense_sampling_album(albums)
+                    raw_caption, mode = caption_video(
+                        asset_id, caption_detailed, person_names=person_names, dense=dense
+                    )
                 else:
                     img = immich_get_thumbnail(asset_id)
                     raw_caption, mode = caption_image(img, person_names=person_names)
