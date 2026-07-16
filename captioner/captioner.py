@@ -675,22 +675,17 @@ _DENSE_SIGNAL_PROMPT = (
     "penetration is also happening in this same frame) or NOCUM (no such cum is currently "
     "visible there -- whether because nothing has happened yet, she's mid-penetration with "
     "no visible fluid, or it's been wiped/moved away since).\n"
-    "Then a space, then exactly one of: TIED (she is physically bound/restrained with rope, "
-    "cuffs, a collar-and-leash, or similar restraint gear that immobilizes her -- a hand or "
-    "another body part simply gripping/holding her during sex does NOT count as TIED) or "
-    "FREE (not restrained).\n"
-    "Example full answers: \"CUM FREE\" or \"NOCUM TIED\". Nothing else."
+    "Example full answers: \"CUM\" or \"NOCUM\". Nothing else."
 )
 
-def _parse_dense_signal(text: str) -> Tuple[bool, bool, bool]:
+def _parse_dense_signal(text: str) -> Tuple[bool, bool]:
     # The model doesn't reliably stick to the single merged token "NOCUM" -- it often
     # writes "NO CUM" as two separate words instead, which still contains a standalone
     # "CUM" word that \bCUM\b would otherwise match. Check the negative form first.
     t = text.upper()
     is_titlecard = "TITLECARD" in t
     is_cum = bool(re.search(r"\bCUM\b", t)) and "NOCUM" not in t and "NO CUM" not in t
-    is_tied = bool(re.search(r"\bTIED\b", t))
-    return is_titlecard, is_cum, is_tied
+    return is_titlecard, is_cum
 
 def _caption_video_dense(
     frames: List[Tuple[float, Image.Image]],
@@ -698,15 +693,12 @@ def _caption_video_dense(
     person_names: Optional[List[str]],
 ) -> Tuple[str, str]:
     creampie_flags: List[Tuple[float, bool]] = []
-    tied_any = False
     person_frames: List[Tuple[float, Image.Image]] = []
 
     for ts, img in frames:
         signal = caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=16)
-        is_titlecard, is_cum, is_tied = _parse_dense_signal(signal)
-        print(f"[dense-debug] {format_ts(ts)}: {signal!r}", flush=True)
+        is_titlecard, is_cum = _parse_dense_signal(signal)
         creampie_flags.append((ts, is_cum))
-        tied_any = tied_any or is_tied
         if not is_titlecard:
             person_frames.append((ts, img))
 
@@ -727,8 +719,6 @@ def _caption_video_dense(
     summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})" if count else "SUMMARY: 0 creampies detected"
 
     parts = [summary, woman_desc]
-    if tied_any:
-        parts.append("She is tied up/restrained at some point in this video.")
 
     return " || ".join(parts), "VIDEO-FRAMES-DENSE"
 
