@@ -143,10 +143,23 @@ _SEP_REGEX = re.compile(r"\s*[\|\u2022•·–—]+\s*|\s+-\s+")
 _JUNK_FULLCAPTION_REGEXES = [re.compile(r"^watch and share .* gifs on gfycat$", re.IGNORECASE)]
 _TRAILING_HANDLE_RE = re.compile(r"\s*@[\w.]+\s*$", re.IGNORECASE)
 
-# Backstop for when the model narrates a watermark/site-name despite being told not to
-# (e.g. "The watermark 'Princess69.com' is in the top right corner") -- drop the whole
-# sentence rather than leave dangling site names in an otherwise-useful caption.
-_WATERMARK_MENTION_RE = re.compile(r"[^.]*\bwatermarks?\b[^.]*\.?", re.IGNORECASE)
+# Backstop for when the model narrates a watermark/site-name/URL despite being told not
+# to (e.g. "The watermark 'Princess69.com' is in the top right corner", "OnlyFans URL is
+# visible at the bottom"). Split on real sentence boundaries (period-followed-by-space)
+# rather than every period, since site domains like "OnlyFans.com" contain a period with
+# no following space -- a naive per-period split would chop the sentence there and leave
+# a dangling ".com/whatever" fragment behind.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_JUNK_SENTENCE_RE = re.compile(
+    r"\b(?:watermarks?|logos?|onlyfans|url)\b"
+    r"|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|co|xyz|vip|me|tv)\b",
+    re.IGNORECASE,
+)
+
+def _strip_watermark_sentences(s: str) -> str:
+    sentences = _SENTENCE_SPLIT_RE.split(s)
+    kept = [sent for sent in sentences if not _JUNK_SENTENCE_RE.search(sent)]
+    return " ".join(kept).strip()
 
 # Backstop for the model opening with meta-commentary about the caption itself instead of
 # describing the image (e.g. "A smutty, degrading caption for the image: ...").
@@ -171,7 +184,7 @@ def clean_caption(raw: str) -> str:
         if r.match(s):
             return ""
     s = _META_PREAMBLE_RE.sub("", s).strip()
-    s = _WATERMARK_MENTION_RE.sub("", s).strip()
+    s = _strip_watermark_sentences(s)
     s = _BANNED_LABEL_PHRASE_RE.sub(lambda m: f"{m.group(1)} ", s)
     s = _BANNED_NOUN_RE.sub("woman", s)
     s = _BANNED_ADJ_RE.sub("", s)
