@@ -389,7 +389,14 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         return f"{video_note} {lead}" if video_note else lead
 
     subject = "this video frame" if video_note else "this image"
-    gate = f"Look carefully at {subject} and decide: does it actually depict nudity, sex acts, or genitals?"
+    gate = (
+        f"Look carefully at {subject} and decide: does it actually depict nudity, sex acts, or "
+        "genitals? This counts as YES even if only partial -- a single bare breast or nipple "
+        "peeking out while otherwise dressed, an exposed butt cheek, upskirt, sheer/see-through "
+        "fabric you can see through, etc. all count as nudity. Being bound, wearing lingerie, or "
+        "being mostly dressed does NOT make it NO if any bare breast/nipple/butt/genital is "
+        "actually visible."
+    )
     if video_note:
         gate = f"{video_note} {gate}"
 
