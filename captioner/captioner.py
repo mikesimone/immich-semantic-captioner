@@ -50,6 +50,12 @@ VIDEO_TAIL_INTERVAL_SECONDS = float(os.environ.get("VIDEO_TAIL_INTERVAL_SECONDS"
 VIDEO_HEAD_FRAME_COUNT = int(os.environ.get("VIDEO_HEAD_FRAME_COUNT", "4"))
 MAX_VIDEO_FRAMES = int(os.environ.get("MAX_VIDEO_FRAMES", "24"))
 
+# For clips shorter than VIDEO_TAIL_INTERVAL_SECONDS * this many samples, the tail loop
+# below would otherwise land on a single frame at t=0 -- often an establishing shot before
+# the actual content, since the whole clip is shorter than one sampling interval. Shrink
+# the interval so short clips still get multiple frames spread across their full duration.
+VIDEO_MIN_SAMPLES = int(os.environ.get("VIDEO_MIN_SAMPLES", "4"))
+
 # If 1, the detailed-caption model is instructed to describe sexual content
 # directly and explicitly (no euphemisms) instead of writing a sanitized caption.
 EXPLICIT_CAPTIONS = os.environ.get("EXPLICIT_CAPTIONS", "1") == "1"
@@ -488,11 +494,16 @@ def compute_video_timestamps(duration: float) -> List[float]:
     # window size/interval is constant regardless of total video length, so a 5-minute
     # video and a 2-hour video both get the same tight coverage of their final minutes.
     tail_start = max(0.0, duration - VIDEO_TAIL_SECONDS)
+    tail_span = duration - tail_start
+    tail_interval = VIDEO_TAIL_INTERVAL_SECONDS
+    if tail_span < tail_interval * VIDEO_MIN_SAMPLES:
+        tail_interval = max(1.0, tail_span / VIDEO_MIN_SAMPLES)
+
     tail_timestamps: List[float] = []
     t = tail_start
     while t < duration:
         tail_timestamps.append(round(t, 2))
-        t += VIDEO_TAIL_INTERVAL_SECONDS
+        t += tail_interval
     if not tail_timestamps:
         tail_timestamps = [round(max(0.0, duration - 1), 2)]
 
@@ -514,11 +525,14 @@ def compute_video_timestamps(duration: float) -> List[float]:
 def compute_dense_timestamps(duration: float) -> List[float]:
     if duration <= 0:
         return [0.0]
+    interval = DENSE_INTERVAL_SECONDS
+    if duration < interval * VIDEO_MIN_SAMPLES:
+        interval = max(1.0, duration / VIDEO_MIN_SAMPLES)
     timestamps: List[float] = []
     t = 0.0
     while t < duration:
         timestamps.append(round(t, 2))
-        t += DENSE_INTERVAL_SECONDS
+        t += interval
     if len(timestamps) > DENSE_MAX_VIDEO_FRAMES:
         # Thin evenly across the full duration rather than truncating -- for a dense
         # scan we care about coverage of the whole clip, not just one end of it.
