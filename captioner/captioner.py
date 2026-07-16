@@ -459,8 +459,14 @@ def load_joycaption():
     )
     model.eval()
 
-    def caption_detailed(pil_image: Image.Image, video_note: str = "", person_names: Optional[List[str]] = None) -> str:
-        prompt = build_caption_prompt(video_note, person_names)
+    def caption_detailed(
+        pil_image: Image.Image,
+        video_note: str = "",
+        person_names: Optional[List[str]] = None,
+        prompt_override: Optional[str] = None,
+        max_new_tokens: int = 256,
+    ) -> str:
+        prompt = prompt_override if prompt_override is not None else build_caption_prompt(video_note, person_names)
         convo = [
             {"role": "system", "content": "You are a helpful image captioner."},
             {"role": "user", "content": prompt},
@@ -473,7 +479,7 @@ def load_joycaption():
         with torch.inference_mode():
             generate_ids = model.generate(
                 **inputs,
-                max_new_tokens=256,
+                max_new_tokens=max_new_tokens,
                 do_sample=True,
                 temperature=JOYCAPTION_TEMPERATURE,
                 top_p=0.9,
@@ -658,15 +664,66 @@ def count_creampie_events(frame_captions: List[Tuple[float, str]]) -> Tuple[int,
         was_flagged = is_flagged
     return len(event_starts), event_starts
 
-_DENSE_VIDEO_NOTE = (
-    "This is one frame from a video where the same act may repeat multiple times back to "
-    "back. Only use the word \"creampie\" for the exact moment a cock/toy is pulled out and "
-    "a fresh load of cum is visibly dumping out right then -- not for ongoing penetration "
-    "(describe that as fucking/insertion instead) and not for cum that's just sitting there "
-    "from an earlier moment (describe that as \"cum already visible, no active insertion\" "
-    "instead). If a new insertion has started after a previous pull-out, say so plainly -- "
-    "that marks the start of the next one."
+# For dense (creampie-count) videos we don't want a full narrative per frame -- just a
+# cheap per-frame signal for counting, plus one detailed description of the woman from a
+# single representative frame. This short classification prompt drives that per-frame pass.
+_DENSE_SIGNAL_PROMPT = (
+    "Look at this single video frame and answer with ONLY ONE short line, no extra words.\n"
+    "First, if this frame is just a text card, logo, watermark screen, loading screen, or "
+    "otherwise doesn't show a person at all, say \"TITLECARD\" and stop there.\n"
+    "Otherwise say exactly one of:\n"
+    "\"CREAMPIE\" -- a cock/toy has just been pulled out and fresh cum is visibly dumping "
+    "out right now.\n"
+    "\"INSERTED\" -- a cock/toy is currently inside her (ongoing penetration, no pull-out "
+    "happening right now).\n"
+    "\"CUM-VISIBLE\" -- cum is visible but nothing is currently being inserted or pulled "
+    "out (a lull between events).\n"
+    "\"NONE\" -- none of the above apply to this frame.\n"
+    "Then, on the same line, add \" BONDAGE\" if rope, cuffs, a collar/leash, or other "
+    "restraints are visible on her in this frame, otherwise add \" NO-BONDAGE\"."
 )
+
+def _parse_dense_signal(text: str) -> Tuple[bool, bool, bool]:
+    t = text.upper()
+    is_titlecard = "TITLECARD" in t
+    is_creampie = "CREAMPIE" in t
+    is_bondage = "BONDAGE" in t and "NO-BONDAGE" not in t and "NO BONDAGE" not in t
+    return is_titlecard, is_creampie, is_bondage
+
+def _caption_video_dense(
+    frames: List[Tuple[float, Image.Image]],
+    caption_detailed,
+    person_names: Optional[List[str]],
+) -> Tuple[str, str]:
+    creampie_flags: List[Tuple[float, str]] = []
+    bondage_any = False
+    person_frames: List[Tuple[float, Image.Image]] = []
+
+    for ts, img in frames:
+        signal = caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=12)
+        is_titlecard, is_creampie, is_bondage = _parse_dense_signal(signal)
+        creampie_flags.append((ts, "CREAMPIE" if is_creampie else ""))
+        bondage_any = bondage_any or is_bondage
+        if not is_titlecard:
+            person_frames.append((ts, img))
+
+    count, event_times = count_creampie_events(creampie_flags)
+
+    # Pick a representative frame for the one detailed description -- the middle of
+    # whichever frames actually show a person, skipping title cards/intro screens, since
+    # a fixed "just take the middle frame" would sometimes land on an intro card instead.
+    candidates = person_frames or frames
+    _, desc_img = candidates[len(candidates) // 2]
+    woman_desc = caption_detailed(desc_img, video_note="This is one frame from a video.", person_names=person_names)
+
+    plural = "creampie" if count == 1 else "creampies"
+    summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})" if count else "SUMMARY: 0 creampies detected"
+
+    parts = [summary, woman_desc]
+    if bondage_any:
+        parts.append("Bondage/restraints are visible at some point in this video.")
+
+    return " || ".join(parts), "VIDEO-FRAMES-DENSE"
 
 def caption_video(
     asset_id: str,
@@ -682,26 +739,14 @@ def caption_video(
         if not frames:
             raise RuntimeError("no frames extracted")
 
-        video_note = _DENSE_VIDEO_NOTE if dense else "This is one frame from a video."
+        if dense:
+            return _caption_video_dense(frames, caption_detailed, person_names)
 
         parts = []
-        frame_captions: List[Tuple[float, str]] = []
         for ts, img in frames:
-            cap = caption_detailed(img, video_note=video_note, person_names=person_names)
+            cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
             parts.append(f"[{format_ts(ts)}] {cap}")
-            frame_captions.append((ts, cap))
-
-        count, event_times = count_creampie_events(frame_captions)
-        if count >= 1:
-            # Prepended, not appended -- MAX_CAPTION_CHARS truncates from the end, and on a
-            # long/dense video the per-frame detail can run long enough to push a
-            # trailing summary out entirely. The count is the whole point of this feature.
-            plural = "creampie" if count == 1 else "creampies"
-            summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})"
-            parts.insert(0, summary)
-
-        mode = "VIDEO-FRAMES-DENSE" if dense else "VIDEO-FRAMES"
-        return " || ".join(parts), mode
+        return " || ".join(parts), "VIDEO-FRAMES"
     finally:
         try:
             os.remove(video_path)
