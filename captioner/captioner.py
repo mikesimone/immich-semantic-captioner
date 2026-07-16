@@ -693,8 +693,12 @@ def caption_video(
 
         count, event_times = count_creampie_events(frame_captions)
         if count >= 1:
+            # Prepended, not appended -- MAX_CAPTION_CHARS truncates from the end, and on a
+            # long/dense video the per-frame detail can run long enough to push a
+            # trailing summary out entirely. The count is the whole point of this feature.
             plural = "creampie" if count == 1 else "creampies"
-            parts.append(f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})")
+            summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})"
+            parts.insert(0, summary)
 
         mode = "VIDEO-FRAMES-DENSE" if dense else "VIDEO-FRAMES"
         return " || ".join(parts), mode
