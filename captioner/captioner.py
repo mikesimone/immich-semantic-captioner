@@ -67,14 +67,11 @@ JOYCAPTION_REPETITION_PENALTY = float(os.environ.get("JOYCAPTION_REPETITION_PENA
 
 # Albums whose videos get dense, uniform-interval frame sampling across the whole
 # clip instead of head-sparse/tail-dense -- for compilation-style videos where multiple
-# distinct events (e.g. creampies) can occur anywhere, not just near the end.
+# distinct events (e.g. creampies) can occur anywhere, not just near the end, sometimes
+# back to back with little gap between them.
 DENSE_SAMPLING_ALBUM_KEYWORDS = os.environ.get("DENSE_SAMPLING_ALBUM_KEYWORDS", "creampie")
-DENSE_INTERVAL_SECONDS = float(os.environ.get("DENSE_INTERVAL_SECONDS", "8"))
-DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "60"))
-
-# Per-frame "creampie" mentions within this many seconds of each other are treated as
-# the same event rather than double-counted.
-CREAMPIE_EVENT_GAP_SECONDS = float(os.environ.get("CREAMPIE_EVENT_GAP_SECONDS", "20"))
+DENSE_INTERVAL_SECONDS = float(os.environ.get("DENSE_INTERVAL_SECONDS", "5"))
+DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "120"))
 
 # Tagging: best-effort (won't crash if API changes)
 ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you want it
@@ -645,16 +642,31 @@ def format_ts(seconds: float) -> str:
 _CREAMPIE_RE = re.compile(r"creampie", re.IGNORECASE)
 
 def count_creampie_events(frame_captions: List[Tuple[float, str]]) -> Tuple[int, List[str]]:
-    hits = sorted(ts for ts, cap in frame_captions if _CREAMPIE_RE.search(cap))
-    if not hits:
-        return 0, []
-    clusters = [[hits[0]]]
-    for ts in hits[1:]:
-        if ts - clusters[-1][-1] <= CREAMPIE_EVENT_GAP_SECONDS:
-            clusters[-1].append(ts)
-        else:
-            clusters.append([ts])
-    return len(clusters), [format_ts(c[0]) for c in clusters]
+    # frame_captions is already in chronological sample order. Each frame is captioned
+    # independently, so a "creampie" mention marks the pull-out-with-fresh-cum moment for
+    # that single frame -- there's no cross-frame memory for the model to count events
+    # itself. Count a new event on every transition from "not currently a creampie moment"
+    # to "creampie moment": a run of consecutive flagged frames is one event, and as long
+    # as at least one frame in between shows a fresh insertion (not flagged) rather than
+    # lingering residual cum, back-to-back events stay separated instead of merging.
+    event_starts = []
+    was_flagged = False
+    for ts, cap in frame_captions:
+        is_flagged = bool(_CREAMPIE_RE.search(cap))
+        if is_flagged and not was_flagged:
+            event_starts.append(format_ts(ts))
+        was_flagged = is_flagged
+    return len(event_starts), event_starts
+
+_DENSE_VIDEO_NOTE = (
+    "This is one frame from a video where the same act may repeat multiple times back to "
+    "back. Only use the word \"creampie\" for the exact moment a cock/toy is pulled out and "
+    "a fresh load of cum is visibly dumping out right then -- not for ongoing penetration "
+    "(describe that as fucking/insertion instead) and not for cum that's just sitting there "
+    "from an earlier moment (describe that as \"cum already visible, no active insertion\" "
+    "instead). If a new insertion has started after a previous pull-out, say so plainly -- "
+    "that marks the start of the next one."
+)
 
 def caption_video(
     asset_id: str,
@@ -670,16 +682,19 @@ def caption_video(
         if not frames:
             raise RuntimeError("no frames extracted")
 
+        video_note = _DENSE_VIDEO_NOTE if dense else "This is one frame from a video."
+
         parts = []
         frame_captions: List[Tuple[float, str]] = []
         for ts, img in frames:
-            cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
+            cap = caption_detailed(img, video_note=video_note, person_names=person_names)
             parts.append(f"[{format_ts(ts)}] {cap}")
             frame_captions.append((ts, cap))
 
         count, event_times = count_creampie_events(frame_captions)
-        if count >= 2:
-            parts.append(f"SUMMARY: at least {count} separate creampies visible (~{', '.join(event_times)})")
+        if count >= 1:
+            plural = "creampie" if count == 1 else "creampies"
+            parts.append(f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})")
 
         mode = "VIDEO-FRAMES-DENSE" if dense else "VIDEO-FRAMES"
         return " || ".join(parts), mode
