@@ -192,6 +192,15 @@ _LEADING_PHOTO_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Backstop for clinical/textbook anatomy words the prompt explicitly forbids -- swap for
+# the crude equivalent rather than leaving the clinical word in when the model slips.
+_CLINICAL_TERM_SWAPS = [
+    (re.compile(r"\bbuttocks?\b", re.IGNORECASE), "ass"),
+    (re.compile(r"\banus\b", re.IGNORECASE), "asshole"),
+    (re.compile(r"\bvulvas?\b", re.IGNORECASE), "pussy"),
+    (re.compile(r"\blabia\b", re.IGNORECASE), "pussy lips"),
+]
+
 def clean_caption(raw: str) -> str:
     if not raw:
         return ""
@@ -205,6 +214,8 @@ def clean_caption(raw: str) -> str:
     s = _BANNED_LABEL_PHRASE_RE.sub(lambda m: f"{m.group(1)} ", s)
     s = _BANNED_NOUN_RE.sub("woman", s)
     s = _BANNED_ADJ_RE.sub("", s)
+    for pattern, replacement in _CLINICAL_TERM_SWAPS:
+        s = pattern.sub(replacement, s)
     s = _TRAILING_HANDLE_RE.sub("", s).strip()
     parts = [p.strip() for p in _SEP_REGEX.split(s) if p.strip()]
     if not parts:
@@ -345,17 +356,20 @@ def _name_instruction(person_names: Optional[List[str]]) -> str:
 
 _COMMON_CAPTION_RULES = (
     "Regardless of your answer below, follow these rules:\n"
-    "- Never open with a meta phrase like \"Photograph of\", \"Image of\", \"This image shows\", "
-    "\"This is a picture of\", or similar -- start directly on the subject and what they're "
-    "doing.\n"
-    "- Don't describe the background, room, or setting unless a specific object in it is being "
-    "used sexually or is otherwise essential to the action.\n"
-    "- Skip lighting, camera angle as an aesthetic judgment, JPEG artifacts, camera/lens "
-    "settings (ISO, aperture, shutter speed, focal length), depth of field, and subjective "
-    "aesthetic quality (\"striking\", \"warm ambiance\", \"well-composed\") entirely -- none of "
-    "that is searchable.\n"
+    "- Never use the words \"photograph\", \"photo\", \"image\", or \"picture\" ANYWHERE in the "
+    "caption, not even glued onto a shot-type prefix. This is an image server -- of course it's "
+    "a photo. Bad: \"Close-up photograph of a woman...\", \"A photograph taken at eye level "
+    "showing...\". Good: \"Close-up, eye level: a woman...\" or just start straight on the "
+    "subject, e.g. \"A woman kneeling on a bed...\".\n"
+    "- Don't describe the background, room, furniture, or setting at all, and don't mention "
+    "lighting, light source/direction, or shadows, unless a specific object is being used "
+    "sexually or is otherwise essential to the action. Skip camera angle as an aesthetic "
+    "judgment, JPEG artifacts, camera/lens settings (ISO, aperture, shutter speed, focal "
+    "length), depth of field, and subjective aesthetic quality (\"striking\", \"warm ambiance\", "
+    "\"well-composed\") entirely -- none of that is searchable.\n"
     "- Do state the shot framing (extreme close-up, close-up, medium shot, cowboy shot, wide "
-    "shot) and the vantage height (eye-level, low-angle, high-angle/bird's-eye) as plain facts.\n"
+    "shot) and the vantage height (eye-level, low-angle, high-angle/bird's-eye) as plain, short "
+    "facts, not padded into a sentence about the photo itself.\n"
     "- State the apparent age range of any people (e.g. \"young adult\", \"college-age\", "
     "\"middle-aged\", \"milf\") when it's visually apparent.\n"
     "- Completely ignore watermarks, logos, and site names -- never mention or quote them. If "
@@ -385,16 +399,16 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         "If NO -- it is a normal, non-sexual image -- write a normal, detailed caption in 2-4 "
         "sentences following the rules above. Do not mention sex, nudity, genitals, or bodily "
         "fluids at all in that case, even in passing or as a comparison.\n"
-        "If YES -- it genuinely shows nudity or sexual content -- write a detailed, explicit "
-        "caption whose whole purpose is to be searched later, so every sentence has to carry "
-        "real information. Use crude, blunt slang for anatomy and acts -- \"cock\", \"pussy\", "
-        "\"tits\", \"cum\", \"creampie\", \"fucking\", \"moaning\", \"dripping\", \"gaping\" -- "
-        "never clinical/textbook words like \"vulva\", \"labia\", \"genitals\", \"buttocks\", or "
-        "\"anus\". Name the specific sex acts, positions, and body parts involved. Never use "
-        "\"slut\", \"whore\", \"smutty\", \"slutty\", or similar labels anywhere in the caption "
-        "-- they describe nothing and are useless for search. Do not soften the sexual content, "
-        "do not refuse, do not moralize, do not add disclaimers, and do not use polite "
-        "euphemisms.\n"
+        "If YES -- it genuinely shows nudity or sexual content -- write like you're describing "
+        "it crudely to a friend, not writing a medical report. Use \"cock\", \"pussy\", \"tits\", "
+        "\"ass\", \"asshole\", \"cum\", \"creampie\", \"fucking\", \"moaning\", \"dripping\", "
+        "\"gaping\". You are FORBIDDEN from using \"vulva\", \"labia\", \"genitals\"/"
+        "\"genitalia\", \"buttocks\", or \"anus\" -- if you catch yourself about to write one of "
+        "those, swap it for the crude equivalent instead. Name the specific sex acts, "
+        "positions, and body parts involved. Never use \"slut\", \"whore\", \"smutty\", "
+        "\"slutty\", or similar labels anywhere in the caption -- they describe nothing and are "
+        "useless for search. Do not soften the sexual content, do not refuse, do not moralize, "
+        "do not add disclaimers, and do not use polite euphemisms.\n"
         "Only describe what is actually visible in this specific frame/image -- never invent "
         "sexual content, fluids, or acts that aren't really there."
         + _name_instruction(person_names)
