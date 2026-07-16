@@ -702,6 +702,7 @@ def _caption_video_dense(
     for ts, img in frames:
         signal = caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=12)
         is_titlecard, is_creampie, is_bondage = _parse_dense_signal(signal)
+        print(f"[dense-debug] {format_ts(ts)}: {signal!r}", flush=True)
         creampie_flags.append((ts, "CREAMPIE" if is_creampie else ""))
         bondage_any = bondage_any or is_bondage
         if not is_titlecard:
