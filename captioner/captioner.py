@@ -683,9 +683,12 @@ _DENSE_SIGNAL_PROMPT = (
 )
 
 def _parse_dense_signal(text: str) -> Tuple[bool, bool, bool]:
+    # The model doesn't reliably stick to the single merged token "NOCUM" -- it often
+    # writes "NO CUM" as two separate words instead, which still contains a standalone
+    # "CUM" word that \bCUM\b would otherwise match. Check the negative form first.
     t = text.upper()
     is_titlecard = "TITLECARD" in t
-    is_cum = bool(re.search(r"\bCUM\b", t))
+    is_cum = bool(re.search(r"\bCUM\b", t)) and "NOCUM" not in t and "NO CUM" not in t
     is_tied = bool(re.search(r"\bTIED\b", t))
     return is_titlecard, is_cum, is_tied
 
