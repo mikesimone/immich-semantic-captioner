@@ -778,6 +778,13 @@ def get_uncaptioned_candidates_api() -> List[Dict]:
             break
 
     print(f"[api] Found {len(candidates)} uncaptioned assets via API scan", flush=True)
+
+    # Same priority as the DB path: images before videos, newest first within each type.
+    # Two stable sorts: createdAt descending first, then type-priority ascending -- the
+    # second sort preserves the createdAt ordering within each type group.
+    candidates.sort(key=lambda item: item.get("createdAt", "") or "", reverse=True)
+    candidates.sort(key=lambda item: 0 if str(item.get("type", "")).upper() == "IMAGE" else 1)
+
     return candidates
 
 def get_asset_albums(asset_id: str) -> List[str]:
@@ -849,6 +856,14 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
     has_type = pg_column_exists(conn, "asset", "type")
     select_type = 'a."type",' if has_type else "NULL::text as type,"
 
+    # Images before videos (videos are far more expensive per-asset), newest first within
+    # each type -- so anything newly added always jumps to the front of its type's queue
+    # instead of waiting behind the whole existing backlog.
+    if has_type:
+        order_clause = "ORDER BY CASE WHEN a.\"type\" = 'IMAGE' THEN 0 ELSE 1 END ASC, a.\"createdAt\" DESC"
+    else:
+        order_clause = 'ORDER BY a."createdAt" DESC'
+
     sql = f"""
     SELECT
       a.id as id,
@@ -864,7 +879,7 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
       cs.asset_id IS NULL
       AND (ae.description IS NULL OR btrim(ae.description) = '')
     GROUP BY a.id, ae.description {', a."type"' if has_type else ''}
-    ORDER BY a."createdAt" ASC
+    {order_clause}
     LIMIT %s;
     """
 
