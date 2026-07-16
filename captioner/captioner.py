@@ -820,7 +820,7 @@ def immich_ensure_tag_id(tag_value: str) -> Optional[str]:
                 _tag_cache[tag_value] = str(t.get("id"))
                 return _tag_cache[tag_value]
         url = f"{IMMICH_URL}/api/tags"
-        payload = {"value": tag_value}
+        payload = {"name": tag_value}
         r = requests.post(
             url,
             headers={**immich_headers(), "Content-Type": "application/json"},
