@@ -24,6 +24,14 @@ IMMICH_API_KEY = os.environ.get("IMMICH_API_KEY", "")
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 SLEEP_SECONDS = float(os.environ.get("SLEEP_SECONDS", "0.2"))
+
+# How many DB candidates to fetch per poll before re-checking priority order (images
+# before videos, newest-first). Deliberately small and separate from BATCH_SIZE --
+# fetching a full BATCH_SIZE-sized batch up front would commit to working through it
+# entirely (potentially many long videos) before ever re-querying, so newly-available
+# higher-priority work (e.g. images cleared while a long video is mid-processing) would
+# sit waiting instead of jumping the queue like it's supposed to.
+DB_REPRIORITIZE_BATCH = int(os.environ.get("DB_REPRIORITIZE_BATCH", "1"))
 IDLE_SLEEP_SECONDS = int(os.environ.get("IDLE_SLEEP_SECONDS", "60"))
 
 # Postgres (container network) - only used if USE_API_ONLY=false
@@ -1058,7 +1066,7 @@ def main():
         if USE_API_ONLY:
             candidates = get_uncaptioned_candidates_api()
         else:
-            candidates = pg_fetch_candidates(conn, BATCH_SIZE)
+            candidates = pg_fetch_candidates(conn, DB_REPRIORITIZE_BATCH)
 
         if not candidates:
             print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
