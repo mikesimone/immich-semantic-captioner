@@ -73,6 +73,12 @@ DENSE_SAMPLING_ALBUM_KEYWORDS = os.environ.get("DENSE_SAMPLING_ALBUM_KEYWORDS", 
 DENSE_INTERVAL_SECONDS = float(os.environ.get("DENSE_INTERVAL_SECONDS", "2"))
 DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "120"))
 
+# Auto-filing: any video, regardless of which album it's manually sorted into, gets added
+# to one of these based on its detected creampie count (in addition to its existing
+# albums, never removing it from anywhere).
+SINGLE_CREAMPIE_ALBUM_ID = os.environ.get("SINGLE_CREAMPIE_ALBUM_ID", "3a22144e-143c-4f43-a508-8b3f7fadbcb5")
+MULTIPLE_CREAMPIE_ALBUM_ID = os.environ.get("MULTIPLE_CREAMPIE_ALBUM_ID", "e7479905-44b5-42ca-86d0-aaf8fb7c36e3")
+
 # Tagging: best-effort (won't crash if API changes)
 ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you want it
 
@@ -687,11 +693,21 @@ def _parse_dense_signal(text: str) -> Tuple[bool, bool]:
     is_cum = bool(re.search(r"\bCUM\b", t)) and "NOCUM" not in t and "NO CUM" not in t
     return is_titlecard, is_cum
 
-def _caption_video_dense(
+# Broad trigger for "this video plausibly contains ejaculation onto/into a woman" --
+# deliberately wider than just the word "creampie", since content living outside the
+# dedicated creampie albums (Feral, Lydia, etc.) won't necessarily use that exact word.
+_CUM_TRIGGER_RE = re.compile(r"\b(cum|jizz|semen|creampie|cumshot)s?\b", re.IGNORECASE)
+
+# Anthropomorphic/furry art -- deliberately keys off words our own prompt uses for
+# illustrated animal-humanoid characters, not real animals (which would never be
+# described this way under the "identify fictional/franchise character... if illustrated
+# art" instruction), so this shouldn't fire on real-animal content.
+_FURRY_TRIGGER_RE = re.compile(r"\banthro(?:pomorphic)?\b|\bfurry\b", re.IGNORECASE)
+
+def _count_creampies_in_frames(
     frames: List[Tuple[float, Image.Image]],
     caption_detailed,
-    person_names: Optional[List[str]],
-) -> Tuple[str, str]:
+) -> Tuple[int, List[str], List[Tuple[float, Image.Image]]]:
     creampie_flags: List[Tuple[float, bool]] = []
     person_frames: List[Tuple[float, Image.Image]] = []
 
@@ -703,11 +719,18 @@ def _caption_video_dense(
             person_frames.append((ts, img))
 
     count, event_times = count_creampie_events(creampie_flags)
+    return count, event_times, (person_frames or frames)
+
+def _caption_video_dense(
+    frames: List[Tuple[float, Image.Image]],
+    caption_detailed,
+    person_names: Optional[List[str]],
+) -> Tuple[str, str]:
+    count, event_times, candidates = _count_creampies_in_frames(frames, caption_detailed)
 
     # Pick a representative frame for the one detailed description -- the middle of
     # whichever frames actually show a person, skipping title cards/intro screens, since
     # a fixed "just take the middle frame" would sometimes land on an intro card instead.
-    candidates = person_frames or frames
     _, desc_img = candidates[len(candidates) // 2]
     desc_note = (
         "This is one frame from a video. There may be more than one woman in this video -- "
@@ -743,7 +766,22 @@ def caption_video(
         for ts, img in frames:
             cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
             parts.append(f"[{format_ts(ts)}] {cap}")
-        return " || ".join(parts), "VIDEO-FRAMES"
+        full_caption = " || ".join(parts)
+
+        # Not filed in a dedicated creampie album, but the caption itself suggests one
+        # might be present -- re-scan the same already-downloaded video at dense sampling
+        # to get an accurate count, and prepend it. Full narrative detail is kept (unlike
+        # the dedicated-album path) since for cross-listed content the rest of the scene
+        # is the primary point, not just the creampie count.
+        if _CUM_TRIGGER_RE.search(full_caption):
+            dense_frames = extract_video_frames(video_path, dense=True)
+            count, event_times, _ = _count_creampies_in_frames(dense_frames, caption_detailed)
+            if count >= 1:
+                plural = "creampie" if count == 1 else "creampies"
+                summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})"
+                full_caption = f"{summary} || {full_caption}"
+
+        return full_caption, "VIDEO-FRAMES"
     finally:
         try:
             os.remove(video_path)
@@ -814,6 +852,22 @@ def immich_apply_tags(asset_id: str, tag_values: List[str]) -> None:
             print(f"[tag] apply failed {r.status_code}: {r.text}", flush=True)
     except Exception as e:
         print(f"[tag] apply failed: {e}", flush=True)
+
+def immich_add_to_album(asset_id: str, album_id: str) -> None:
+    # Best-effort: adds without removing from any existing album. Immich returns
+    # success=False with reason "duplicate" if it's already a member, which is fine.
+    try:
+        url = f"{IMMICH_URL}/api/albums/{album_id}/assets"
+        r = requests.put(
+            url,
+            headers={**immich_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"ids": [asset_id]}),
+            timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"[album] add {asset_id} -> {album_id} failed {r.status_code}: {r.text}", flush=True)
+    except Exception as e:
+        print(f"[album] add {asset_id} -> {album_id} failed: {e}", flush=True)
 
 # ----------------------------
 # API-only candidate fetch
@@ -1059,6 +1113,17 @@ def main():
 
                     if implied_tags:
                         immich_apply_tags(asset_id, implied_tags)
+
+                    if asset_type == "VIDEO":
+                        count_match = re.search(r"SUMMARY:\s*(\d+)\s+separate\s+creampie", caption, re.IGNORECASE)
+                        if count_match:
+                            n = int(count_match.group(1))
+                            target = SINGLE_CREAMPIE_ALBUM_ID if n == 1 else MULTIPLE_CREAMPIE_ALBUM_ID if n >= 2 else None
+                            if target:
+                                immich_add_to_album(asset_id, target)
+
+                    if _FURRY_TRIGGER_RE.search(caption):
+                        immich_apply_tags(asset_id, ["furry"])
                 else:
                     print(f"[fail] {asset_id} update failed", flush=True)
 
