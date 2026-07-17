@@ -181,7 +181,9 @@ _JUNK_SENTENCE_RE = re.compile(
     r"|\bno\b.{0,40}\b(?:nudity|nude|sexual content|explicit content|explicit acts?|"
     r"genitalia|genitals?)\b"
     r"|\b(?:nudity|nude|sexual content|explicit content|genitalia|genitals?)\b.{0,30}"
-    r"\b(?:not|isn't|is\s+not)\b.{0,20}\b(?:present|depicted|shown|visible|apply)\b",
+    r"\b(?:not|isn't|is\s+not)\b.{0,20}\b(?:present|depicted|shown|visible|apply)\b"
+    r"|\bnote\s*:.{0,100}\b(?:guidelines?|instructions?|described|treated as such|"
+    r"based on the description)\b",
     re.IGNORECASE,
 )
 
@@ -443,6 +445,11 @@ _COMMON_CAPTION_RULES = (
     "fetish elements (e.g. \"paizuri\", \"gangbang\", \"bukkake\", \"futanari\") instead of "
     "vaguer plain-English phrasing.\n"
     "- Never use vague or ambiguous language -- say exactly what's happening.\n"
+    "- Never include meta-commentary about these instructions themselves, in parentheses "
+    "or as a plain sentence (e.g. \"Note: this image contains explicit content and should "
+    "be treated as such\", or a note explaining the image is non-sexual and was described "
+    "accordingly) -- that's not part of the caption, ever, regardless of whether the image "
+    "turned out to be sexual or not.\n"
 )
 
 def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]] = None) -> str:
@@ -471,9 +478,7 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         "NOT saying it's absent either. Never write sentences like \"no nudity is present\", "
         "\"no sexual content is depicted\", \"no explicit content is shown\", or similar -- if "
         "there's nothing sexual, the caption simply never brings sex up at all, in either "
-        "direction. Also never include meta-commentary about these instructions themselves "
-        "(e.g. a parenthetical note explaining that the image is non-sexual and was described "
-        "accordingly) -- that's not part of the caption.\n"
+        "direction.\n"
         "If YES -- it genuinely shows nudity or sexual content -- write like you're describing "
         "it crudely to a friend, not writing a medical report. Use \"cock\", \"pussy\", \"tits\", "
         "\"ass\", \"asshole\", \"cum\", \"creampie\", \"fucking\", \"moaning\", \"dripping\", "
