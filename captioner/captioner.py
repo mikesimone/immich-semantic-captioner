@@ -178,9 +178,10 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _JUNK_SENTENCE_RE = re.compile(
     r"\b(?:watermarks?|logos?|onlyfans|url)\b"
     r"|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|co|xyz|vip|me|tv)\b"
-    r"|\bno\b.{0,40}\b(?:nudity|nude|sexual content|explicit content|genitalia|genitals)\b"
-    r"|\b(?:nudity|nude|sexual content|explicit content|genitalia|genitals)\b.{0,30}"
-    r"\b(?:not|isn't|is\s+not)\b.{0,20}\b(?:present|depicted|shown|visible)\b",
+    r"|\bno\b.{0,40}\b(?:nudity|nude|sexual content|explicit content|explicit acts?|"
+    r"genitalia|genitals?)\b"
+    r"|\b(?:nudity|nude|sexual content|explicit content|genitalia|genitals?)\b.{0,30}"
+    r"\b(?:not|isn't|is\s+not)\b.{0,20}\b(?:present|depicted|shown|visible|apply)\b",
     re.IGNORECASE,
 )
 
@@ -197,8 +198,8 @@ _META_NOTE_PAREN_RE = re.compile(r"\(\s*note\s*:?[^)]*\)", re.IGNORECASE)
 # Backstop for the model opening with meta-commentary about the caption itself instead of
 # describing the image (e.g. "A smutty, degrading caption for the image: ...").
 _META_PREAMBLE_RE = re.compile(
-    r"^(a|an)\s+[\w,\s]{0,40}\bcaption\b[\w\s]{0,20}\b(for|of)\s+(this|the)\s+"
-    r"(image|video|photo|frame)[^:]{0,10}:\s*",
+    r"^(a|an)\s+[\w,\s-]{0,40}\bcaption\b[\w\s]{0,20}\b(for|of)\s+(this|the)\s+"
+    r"(?:[a-z-]+\s+){0,2}(image|video|photo|frame)[^:]{0,10}:\s*",
     re.IGNORECASE,
 )
 
@@ -292,12 +293,39 @@ def extract_identities_from_albums(albums: List[str]) -> List[str]:
             out.append(name)
     return out
 
-def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List[str]]:
+def find_albums_matching_identity(albums: List[str], identity_name: str) -> List[str]:
+    matches: List[str] = []
+    for album in albums or []:
+        if not album:
+            continue
+        for album_kw, rx in _IDENTITY_ALBUM_REGEXES.items():
+            if _IDENTITY_MAP.get(album_kw) == identity_name and rx.search(album):
+                matches.append(album)
+    return matches
+
+# If a caption doesn't reference a person at all (no pronoun, no generic person noun),
+# an identity-matched album ("Me", "Lydia", etc.) is almost certainly a misfile -- there's
+# no one in the frame to be that person. Broad on purpose: the goal is to catch "no person
+# whatsoever" (a meme, a screenshot, an object), not to second-guess borderline captions.
+_PERSON_WORD_RE = re.compile(
+    r"\b(?:he|him|his|she|her|hers|they|them|their|man|men|woman|women|guy|girl|"
+    r"person|people|individual|figure)\b",
+    re.IGNORECASE,
+)
+
+def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List[str], List[str]]:
+    """Returns (updated_caption, implied_tags, misfiled_identities)."""
     if not caption:
-        return caption, []
+        return caption, [], []
     identities = extract_identities_from_albums(albums)
     if not identities:
-        return caption, []
+        return caption, [], []
+
+    if not _PERSON_WORD_RE.search(caption):
+        # Nobody appears to be depicted at all -- don't force any identity name into the
+        # caption. Flag every expected identity so the caller can clean up the misfile.
+        return caption, [], identities
+
     out = caption
     for name in identities:
         nouns = _IDENTITY_HINTS.get(name) or _IDENTITY_HINTS.get(name.split()[0])
@@ -316,7 +344,7 @@ def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List
             else:
                 out = f"{name}: {out}"
     out = _WS_REGEX.sub(" ", out).strip()[:MAX_CAPTION_CHARS]
-    return out, identities
+    return out, identities, []
 
 # ----------------------------
 # Florence-2 (OCR only -- cheap pre-pass to catch text-heavy images/memes)
@@ -959,6 +987,59 @@ def immich_add_to_album(asset_id: str, album_id: str) -> None:
     except Exception as e:
         print(f"[album] add {asset_id} -> {album_id} failed: {e}", flush=True)
 
+def immich_remove_from_album(asset_id: str, album_id: str) -> None:
+    try:
+        url = f"{IMMICH_URL}/api/albums/{album_id}/assets"
+        r = requests.request(
+            "DELETE",
+            url,
+            headers={**immich_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"ids": [asset_id]}),
+            timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"[album] remove {asset_id} <- {album_id} failed {r.status_code}: {r.text}", flush=True)
+    except Exception as e:
+        print(f"[album] remove {asset_id} <- {album_id} failed: {e}", flush=True)
+
+def immich_unarchive(asset_id: str) -> None:
+    # Immich's newer API uses the "visibility" enum (timeline/archive/locked) as the
+    # authoritative field -- the legacy "isArchived" boolean is derived from it, not
+    # independently settable (confirmed empirically: setting isArchived alone no-ops).
+    try:
+        url = f"{IMMICH_URL}/api/assets"
+        r = requests.put(
+            url,
+            headers={**immich_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"ids": [asset_id], "visibility": "timeline"}),
+            timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"[unarchive] {asset_id} failed {r.status_code}: {r.text}", flush=True)
+    except Exception as e:
+        print(f"[unarchive] {asset_id} failed: {e}", flush=True)
+
+_album_list_cache: Optional[List[dict]] = None
+
+def immich_list_albums() -> List[dict]:
+    global _album_list_cache
+    if _album_list_cache is not None:
+        return _album_list_cache
+    try:
+        r = requests.get(f"{IMMICH_URL}/api/albums", headers=immich_headers(), timeout=60)
+        r.raise_for_status()
+        _album_list_cache = r.json()
+    except Exception as e:
+        print(f"[album] list failed: {e}", flush=True)
+        return []
+    return _album_list_cache
+
+def immich_album_id_by_name(name: str) -> Optional[str]:
+    for a in immich_list_albums():
+        if a.get("albumName") == name:
+            return a.get("id")
+    return None
+
 # ----------------------------
 # API-only candidate fetch
 # ----------------------------
@@ -1193,7 +1274,7 @@ def main():
                     print(f"[skip] {asset_id} produced empty/junk caption (marked skip)", flush=True)
                     continue
 
-                caption, implied_tags = apply_identity_overrides(caption, albums)
+                caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
                 caption = " ".join(caption.split()).strip()[:MAX_CAPTION_CHARS]
 
                 ok = immich_update_description(asset_id, caption)
@@ -1204,6 +1285,15 @@ def main():
 
                     if implied_tags:
                         immich_apply_tags(asset_id, implied_tags)
+
+                    if misfiled_identities:
+                        for name in misfiled_identities:
+                            for album_name in find_albums_matching_identity(albums, name):
+                                album_id = immich_album_id_by_name(album_name)
+                                if album_id:
+                                    immich_remove_from_album(asset_id, album_id)
+                        immich_unarchive(asset_id)
+                        print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
 
                     if asset_type == "VIDEO":
                         count_match = re.search(r"SUMMARY:\s*(\d+)\s+separate\s+creampie", caption, re.IGNORECASE)
