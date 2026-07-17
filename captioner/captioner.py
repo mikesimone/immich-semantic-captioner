@@ -451,7 +451,9 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         "them.\n"
         "If a pussy is visible, describe it in detail: whether the labia are an \"innie\" or "
         "\"outie\", whether it looks tight or loose/gaped, and anything inserted into it "
-        "(fingers, a toy/object, a tongue, a cock). Mention any visible cum/jizz.\n"
+        "(fingers, a toy/object, a tongue, a cock). If there's any wet/glistening/dripping "
+        "fluid visible on or around her genitals, ass, or mouth, call it cum -- don't hedge "
+        "with vaguer words like \"moisture\", \"wetness\", or \"fluid\" instead.\n"
         "Only describe what is actually visible in this specific frame/image -- never invent "
         "sexual content, fluids, or acts that aren't really there."
         + _name_instruction(person_names)
