@@ -7,6 +7,8 @@ import json
 import re
 import subprocess
 import tempfile
+import threading
+import queue
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -72,6 +74,14 @@ EXPLICIT_CAPTIONS = os.environ.get("EXPLICIT_CAPTIONS", "1") == "1"
 # (helps avoid the model looping on the same few words like "slutty"/"smutty").
 JOYCAPTION_TEMPERATURE = float(os.environ.get("JOYCAPTION_TEMPERATURE", "0.75"))
 JOYCAPTION_REPETITION_PENALTY = float(os.environ.get("JOYCAPTION_REPETITION_PENALTY", "1.15"))
+
+# Batched GPU generation: N images processed in a single forward pass instead of one at a
+# time. 0 = auto-calibrate against real GPU memory at startup (probes increasing batch
+# sizes with a real generate() call at full max_new_tokens, backs off on CUDA OOM, then
+# applies a safety margin) instead of guessing a fixed number that may not fit this
+# GPU/model/VRAM-headroom combination.
+MAX_GEN_BATCH = int(os.environ.get("MAX_GEN_BATCH", "0"))
+GEN_BATCH_SAFETY_FACTOR = float(os.environ.get("GEN_BATCH_SAFETY_FACTOR", "0.75"))
 
 # Albums whose videos get dense, uniform-interval frame sampling across the whole
 # clip instead of head-sparse/tail-dense -- for compilation-style videos where multiple
@@ -527,6 +537,14 @@ def load_joycaption():
     )
 
     processor = AutoProcessor.from_pretrained(model_id)
+    # Batched generation needs a real pad token and left-padding, so every row's prompt
+    # ends at the same column and the generated continuation starts there uniformly for
+    # every item in the batch (no per-row bookkeeping needed to find where each answer
+    # begins).
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    processor.tokenizer.padding_side = "left"
+
     model = LlavaForConditionalGeneration.from_pretrained(
         model_id,
         quantization_config=quant_config,
@@ -535,20 +553,23 @@ def load_joycaption():
     )
     model.eval()
 
-    def caption_detailed(
-        pil_image: Image.Image,
-        video_note: str = "",
-        person_names: Optional[List[str]] = None,
-        prompt_override: Optional[str] = None,
-        max_new_tokens: int = 256,
-    ) -> str:
-        prompt = prompt_override if prompt_override is not None else build_caption_prompt(video_note, person_names)
-        convo = [
-            {"role": "system", "content": "You are a helpful image captioner."},
-            {"role": "user", "content": prompt},
-        ]
-        convo_string = processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True)
-        inputs = processor(text=[convo_string], images=[pil_image], return_tensors="pt").to(model.device)
+    def _raw_batch_generate(batch_items: List[dict]) -> List[str]:
+        prompts = []
+        images = []
+        max_new_tokens = 1
+        for item in batch_items:
+            prompt = item.get("prompt_override")
+            if prompt is None:
+                prompt = build_caption_prompt(item.get("video_note", ""), item.get("person_names"))
+            convo = [
+                {"role": "system", "content": "You are a helpful image captioner."},
+                {"role": "user", "content": prompt},
+            ]
+            prompts.append(processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True))
+            images.append(item["pil_image"])
+            max_new_tokens = max(max_new_tokens, item.get("max_new_tokens", 256))
+
+        inputs = processor(text=prompts, images=images, return_tensors="pt", padding=True).to(model.device)
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
 
@@ -560,13 +581,87 @@ def load_joycaption():
                 temperature=JOYCAPTION_TEMPERATURE,
                 top_p=0.9,
                 repetition_penalty=JOYCAPTION_REPETITION_PENALTY,
-            )[0]
-        generate_ids = generate_ids[inputs["input_ids"].shape[1]:]
-        txt = processor.tokenizer.decode(
-            generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
-        return " ".join(txt.strip().split())[:MAX_CAPTION_CHARS]
+            )
+        # Left-padding means every row's prompt occupies the same width, so the generated
+        # continuation starts at the same column for every row -- no per-row offset math.
+        gen_only = generate_ids[:, inputs["input_ids"].shape[1]:]
+        out = []
+        for row in gen_only:
+            txt = processor.tokenizer.decode(row, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            out.append(" ".join(txt.strip().split())[:MAX_CAPTION_CHARS])
+        return out
 
+    _batch_state = {"max_batch": 1}
+
+    def caption_detailed_batch(batch_items: List[dict]) -> List[str]:
+        if not batch_items:
+            return []
+        cap = _batch_state["max_batch"]
+        if len(batch_items) <= cap:
+            return _raw_batch_generate(batch_items)
+        out: List[str] = []
+        for i in range(0, len(batch_items), cap):
+            out.extend(_raw_batch_generate(batch_items[i:i + cap]))
+        return out
+
+    def _calibrate_max_batch() -> int:
+        if MAX_GEN_BATCH > 0:
+            print(f"[calibrate] MAX_GEN_BATCH override: {MAX_GEN_BATCH}", flush=True)
+            return MAX_GEN_BATCH
+
+        # Solid-color stand-in at a generous resolution -- the vision tower resizes/crops
+        # to a fixed input size regardless, so this exercises the same tensor shapes as a
+        # real photo. Use the longest/most detailed real prompt (full explicit-caption
+        # instructions) and the real max_new_tokens ceiling, so the probe reflects actual
+        # worst-case memory use, not a lighter approximation of it.
+        test_image = Image.new("RGB", (1024, 1024), color=(128, 64, 32))
+        test_prompt = build_caption_prompt()
+
+        found = 1
+        size = 32
+        while size >= 1:
+            try:
+                _raw_batch_generate(
+                    [{"pil_image": test_image, "prompt_override": test_prompt, "max_new_tokens": 256}] * size
+                )
+                found = size
+                break
+            except torch.cuda.OutOfMemoryError:
+                size = size // 2
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                size = size // 2
+            finally:
+                torch.cuda.empty_cache()
+
+        safe = max(1, int(found * GEN_BATCH_SAFETY_FACTOR))
+        print(
+            f"[calibrate] Max viable generation batch ~{found}, using {safe} "
+            f"({int(GEN_BATCH_SAFETY_FACTOR * 100)}% safety margin)",
+            flush=True,
+        )
+        return safe
+
+    _batch_state["max_batch"] = _calibrate_max_batch()
+
+    def caption_detailed(
+        pil_image: Image.Image,
+        video_note: str = "",
+        person_names: Optional[List[str]] = None,
+        prompt_override: Optional[str] = None,
+        max_new_tokens: int = 256,
+    ) -> str:
+        return caption_detailed_batch([{
+            "pil_image": pil_image,
+            "video_note": video_note,
+            "person_names": person_names,
+            "prompt_override": prompt_override,
+            "max_new_tokens": max_new_tokens,
+        }])[0]
+
+    caption_detailed.batch = caption_detailed_batch
+    caption_detailed.max_batch = _batch_state["max_batch"]
     return caption_detailed
 
 # ----------------------------
@@ -799,8 +894,24 @@ def _count_creampies_in_frames(
     frame_states: List[Tuple[float, str]] = []
     person_frames: List[Tuple[float, Image.Image]] = []
 
-    for ts, img in frames:
-        signal = caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=16)
+    # All frames of one video share the exact same short classifier prompt, differing
+    # only by image -- an ideal, low-risk batching target (no padding complexity from
+    # varying prompt lengths) that turns up to DENSE_MAX_VIDEO_FRAMES sequential
+    # single-frame generate() calls into a handful of batched ones.
+    batch_fn = getattr(caption_detailed, "batch", None)
+    if batch_fn:
+        items = [
+            {"pil_image": img, "prompt_override": _DENSE_SIGNAL_PROMPT, "max_new_tokens": 16}
+            for _, img in frames
+        ]
+        signals = batch_fn(items)
+    else:
+        signals = [
+            caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=16)
+            for _, img in frames
+        ]
+
+    for (ts, img), signal in zip(frames, signals):
         is_titlecard, state = _parse_dense_signal(signal)
         frame_states.append((ts, state))
         if not is_titlecard:
@@ -1230,107 +1341,185 @@ def main():
 
     total_done = 0
 
-    while True:
-        if USE_API_ONLY:
+    def process_candidate(
+        asset_id: str,
+        asset_type: str,
+        albums: List[str],
+        prefetched_thumbnail: Optional[Image.Image] = None,
+        prefetched_thumbnail_error: Optional[Exception] = None,
+    ) -> None:
+        nonlocal total_done
+        try:
+            if asset_type == "VIDEO" and not CAPTION_VIDEOS:
+                if not USE_API_ONLY:
+                    pg_mark_skip(conn, asset_id, "SKIP_VIDEO")
+                print(f"[skip] {asset_id} is VIDEO (skipping)", flush=True)
+                return
+
+            person_names = extract_identities_from_albums(albums)
+
+            if asset_type == "VIDEO":
+                dense = is_dense_sampling_album(albums)
+                raw_caption, mode = caption_video(
+                    asset_id, caption_detailed, person_names=person_names, dense=dense
+                )
+            else:
+                if prefetched_thumbnail_error is not None:
+                    raise prefetched_thumbnail_error
+                img = prefetched_thumbnail if prefetched_thumbnail is not None else immich_get_thumbnail(asset_id)
+                raw_caption, mode = caption_image(img, person_names=person_names)
+                generate_and_apply_e621_tags(asset_id, img, caption_detailed)
+
+            caption = clean_caption(raw_caption)
+            if not caption.strip():
+                if not USE_API_ONLY:
+                    pg_mark_skip(conn, asset_id, "EMPTY_OR_JUNK_CAPTION")
+                print(f"[skip] {asset_id} produced empty/junk caption (marked skip)", flush=True)
+                return
+
+            caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
+            caption = " ".join(caption.split()).strip()[:MAX_CAPTION_CHARS]
+
+            ok = immich_update_description(asset_id, caption)
+            if ok:
+                total_done += 1
+                alb = ", ".join(albums[:3]) + ("..." if len(albums) > 3 else "")
+                print(f"[ok] {asset_id} [{mode}] albums=[{alb}] => {caption}", flush=True)
+
+                if implied_tags:
+                    immich_apply_tags(asset_id, implied_tags)
+
+                if misfiled_identities:
+                    for name in misfiled_identities:
+                        for album_name in find_albums_matching_identity(albums, name):
+                            album_id = immich_album_id_by_name(album_name)
+                            if album_id:
+                                immich_remove_from_album(asset_id, album_id)
+                    immich_unarchive(asset_id)
+                    print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
+
+                if asset_type == "VIDEO":
+                    count_match = re.search(r"SUMMARY:\s*(\d+)\s+separate\s+creampie", caption, re.IGNORECASE)
+                    if count_match:
+                        n = int(count_match.group(1))
+                        target = SINGLE_CREAMPIE_ALBUM_ID if n == 1 else MULTIPLE_CREAMPIE_ALBUM_ID if n >= 2 else None
+                        if target:
+                            immich_add_to_album(asset_id, target)
+
+                if _FURRY_TRIGGER_RE.search(caption):
+                    immich_add_to_album(asset_id, FURRY_ALBUM_ID)
+            else:
+                print(f"[fail] {asset_id} update failed", flush=True)
+
+            time.sleep(SLEEP_SECONDS)
+
+        except ThumbnailNotFound as e:
+            if not USE_API_ONLY:
+                pg_mark_skip(conn, asset_id, "THUMBNAIL_404")
+            print(f"[skip] {asset_id}: {e} (marked skip)", flush=True)
+            time.sleep(0.2)
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            if not USE_API_ONLY:
+                pg_mark_skip(conn, asset_id, f"HTTP_ERROR_{status}")
+            print(f"[skip] {asset_id}: HTTP {status} fetching asset (marked skip)", flush=True)
+            time.sleep(0.2)
+
+        except Exception as e:
+            print(f"[error] {asset_id}: {e}", flush=True)
+            time.sleep(1.0)
+
+    if USE_API_ONLY:
+        while True:
             candidates = get_uncaptioned_candidates_api()
-        else:
-            candidates = pg_fetch_candidates(conn, DB_REPRIORITIZE_BATCH)
+            if not candidates:
+                print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
+                time.sleep(IDLE_SLEEP_SECONDS)
+                continue
 
-        if not candidates:
-            print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
-            time.sleep(IDLE_SLEEP_SECONDS)
-            continue
-
-        print(f"[batch] {len(candidates)} candidates", flush=True)
-
-        for row in candidates:
-            if USE_API_ONLY:
+            print(f"[batch] {len(candidates)} candidates", flush=True)
+            for row in candidates:
                 asset_id = row.get("id")
                 asset_type = row.get("type", "UNKNOWN").upper()  # API may not have type; fallback
                 albums = get_asset_albums(asset_id)  # Fetch separately
-            else:
-                asset_id = str(row["id"])
-                asset_type = (row.get("type") or "").upper()
-                albums = row.get("albums") or []
+                process_candidate(asset_id, asset_type, albums)
 
-            try:
-                if asset_type == "VIDEO" and not CAPTION_VIDEOS:
-                    if not USE_API_ONLY:
-                        pg_mark_skip(conn, asset_id, "SKIP_VIDEO")
-                    print(f"[skip] {asset_id} is VIDEO (skipping)", flush=True)
+            print(f"[progress] total updated this run: {total_done}", flush=True)
+
+    # DB-direct mode: a background thread stays one candidate ahead of the GPU -- while
+    # process_candidate() is busy running generation on the current asset, this thread
+    # fetches the next DB candidate and (for images) downloads its thumbnail, so that
+    # network round-trip happens off the GPU's critical path instead of stalling it every
+    # single item. The queue is deliberately maxsize=1: only ever one item prefetched
+    # ahead, so priority reordering (freshly-cleared images jumping the queue) stays just
+    # as fresh as the old synchronous DB_REPRIORITIZE_BATCH=1 behavior.
+    #
+    # _in_flight_ids guards against the prefetch thread re-fetching the same candidate
+    # twice before its caption has actually been written back (the DB row still looks
+    # like a valid candidate -- empty description -- right up until process_candidate()
+    # finishes and calls immich_update_description).
+    prefetch_q: "queue.Queue" = queue.Queue(maxsize=1)
+    in_flight_lock = threading.Lock()
+    in_flight_ids: set = set()
+
+    def _prefetch_worker():
+        worker_conn = pg_connect()
+        try:
+            while True:
+                try:
+                    rows = pg_fetch_candidates(worker_conn, DB_REPRIORITIZE_BATCH)
+                except Exception as e:
+                    prefetch_q.put(("fetch_error", e))
+                    time.sleep(1.0)
                     continue
 
-                person_names = extract_identities_from_albums(albums)
-
-                if asset_type == "VIDEO":
-                    dense = is_dense_sampling_album(albums)
-                    raw_caption, mode = caption_video(
-                        asset_id, caption_detailed, person_names=person_names, dense=dense
-                    )
-                else:
-                    img = immich_get_thumbnail(asset_id)
-                    raw_caption, mode = caption_image(img, person_names=person_names)
-                    generate_and_apply_e621_tags(asset_id, img, caption_detailed)
-
-                caption = clean_caption(raw_caption)
-                if not caption.strip():
-                    if not USE_API_ONLY:
-                        pg_mark_skip(conn, asset_id, "EMPTY_OR_JUNK_CAPTION")
-                    print(f"[skip] {asset_id} produced empty/junk caption (marked skip)", flush=True)
+                if not rows:
+                    prefetch_q.put(("idle", None))
+                    time.sleep(IDLE_SLEEP_SECONDS)
                     continue
 
-                caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
-                caption = " ".join(caption.split()).strip()[:MAX_CAPTION_CHARS]
+                for row in rows:
+                    asset_id = str(row["id"])
+                    with in_flight_lock:
+                        if asset_id in in_flight_ids:
+                            continue
+                        in_flight_ids.add(asset_id)
 
-                ok = immich_update_description(asset_id, caption)
-                if ok:
-                    total_done += 1
-                    alb = ", ".join(albums[:3]) + ("..." if len(albums) > 3 else "")
-                    print(f"[ok] {asset_id} [{mode}] albums=[{alb}] => {caption}", flush=True)
+                    asset_type = (row.get("type") or "").upper()
+                    albums = row.get("albums") or []
+                    thumb, thumb_err = None, None
+                    if asset_type != "VIDEO":
+                        try:
+                            thumb = immich_get_thumbnail(asset_id)
+                        except Exception as e:
+                            thumb_err = e
 
-                    if implied_tags:
-                        immich_apply_tags(asset_id, implied_tags)
+                    prefetch_q.put(("row", (asset_id, asset_type, albums, thumb, thumb_err)))
+        finally:
+            worker_conn.close()
 
-                    if misfiled_identities:
-                        for name in misfiled_identities:
-                            for album_name in find_albums_matching_identity(albums, name):
-                                album_id = immich_album_id_by_name(album_name)
-                                if album_id:
-                                    immich_remove_from_album(asset_id, album_id)
-                        immich_unarchive(asset_id)
-                        print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
+    threading.Thread(target=_prefetch_worker, daemon=True, name="prefetch").start()
+    print("[prefetch] background lookahead thread started", flush=True)
 
-                    if asset_type == "VIDEO":
-                        count_match = re.search(r"SUMMARY:\s*(\d+)\s+separate\s+creampie", caption, re.IGNORECASE)
-                        if count_match:
-                            n = int(count_match.group(1))
-                            target = SINGLE_CREAMPIE_ALBUM_ID if n == 1 else MULTIPLE_CREAMPIE_ALBUM_ID if n >= 2 else None
-                            if target:
-                                immich_add_to_album(asset_id, target)
+    while True:
+        kind, payload = prefetch_q.get()
 
-                    if _FURRY_TRIGGER_RE.search(caption):
-                        immich_add_to_album(asset_id, FURRY_ALBUM_ID)
-                else:
-                    print(f"[fail] {asset_id} update failed", flush=True)
+        if kind == "fetch_error":
+            print(f"[error] prefetch DB fetch failed: {payload}", flush=True)
+            time.sleep(1.0)
+            continue
 
-                time.sleep(SLEEP_SECONDS)
+        if kind == "idle":
+            print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
+            continue
 
-            except ThumbnailNotFound as e:
-                if not USE_API_ONLY:
-                    pg_mark_skip(conn, asset_id, "THUMBNAIL_404")
-                print(f"[skip] {asset_id}: {e} (marked skip)", flush=True)
-                time.sleep(0.2)
-
-            except requests.exceptions.HTTPError as e:
-                status = e.response.status_code if e.response is not None else "?"
-                if not USE_API_ONLY:
-                    pg_mark_skip(conn, asset_id, f"HTTP_ERROR_{status}")
-                print(f"[skip] {asset_id}: HTTP {status} fetching asset (marked skip)", flush=True)
-                time.sleep(0.2)
-
-            except Exception as e:
-                print(f"[error] {asset_id}: {e}", flush=True)
-                time.sleep(1.0)
+        asset_id, asset_type, albums, thumb, thumb_err = payload
+        try:
+            process_candidate(asset_id, asset_type, albums, prefetched_thumbnail=thumb, prefetched_thumbnail_error=thumb_err)
+        finally:
+            with in_flight_lock:
+                in_flight_ids.discard(asset_id)
 
         print(f"[progress] total updated this run: {total_done}", flush=True)
 
