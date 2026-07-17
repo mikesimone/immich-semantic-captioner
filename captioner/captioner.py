@@ -668,21 +668,31 @@ def format_ts(seconds: float) -> str:
     s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
 
-def count_creampie_events(frame_flags: List[Tuple[float, bool]]) -> Tuple[int, List[str]]:
-    # frame_flags is already in chronological sample order, one bool per frame: is cum
-    # currently visible in/around her pussy or ass. A single still frame can't show the
-    # *instant* of pulling out -- that's a motion, not a static visual state -- so we don't
-    # ask the model to recognize that moment directly. Instead we count every transition
-    # from "not visible" to "visible" across the sampled sequence: a run of consecutive
-    # flagged frames is one event, and as long as at least one frame in between shows a
-    # fresh insertion (not flagged) rather than lingering cum, back-to-back events stay
-    # separated instead of merging.
-    event_starts = []
-    was_flagged = False
-    for ts, is_flagged in frame_flags:
-        if is_flagged and not was_flagged:
-            event_starts.append(format_ts(ts))
-        was_flagged = is_flagged
+def count_creampie_events(frame_states: List[Tuple[float, str]]) -> Tuple[int, List[str]]:
+    # frame_states is already in chronological sample order: one of INSERTED/CUM/NONE per
+    # frame. A single still frame can't show the *instant* of pulling out -- that's a
+    # motion, not a static visual state -- so we don't ask the model to recognize that
+    # moment directly, and counting every fresh "cum visible" sighting as its own event
+    # doesn't work either: cum can go in and out of view purely from a camera angle or
+    # position change with no new ejaculation involved (this replaced logic that counted
+    # 9 events on a video with exactly one real creampie, purely from repositioning).
+    # Instead: a newly-visible CUM sighting only counts as a NEW event if we've seen a
+    # fresh INSERTED frame since the last one we counted -- i.e. real evidence a new round
+    # actually happened, not just that the same load became visible again.
+    event_starts: List[str] = []
+    was_cum = False
+    seen_insertion_since_last_event = False
+    for ts, state in frame_states:
+        if state == "INSERTED":
+            seen_insertion_since_last_event = True
+            was_cum = False
+        elif state == "CUM":
+            if not was_cum and (seen_insertion_since_last_event or not event_starts):
+                event_starts.append(format_ts(ts))
+                seen_insertion_since_last_event = False
+            was_cum = True
+        else:
+            was_cum = False
     return len(event_starts), event_starts
 
 # For dense (creampie-count) videos we don't want a full narrative per frame -- just a
@@ -693,22 +703,30 @@ _DENSE_SIGNAL_PROMPT = (
     "sentences, no explanations, no punctuation beyond what's shown below.\n"
     "If this frame is just a text card, logo, watermark screen, or loading screen with no "
     "person shown, answer exactly: TITLECARD\n"
-    "Otherwise answer with exactly one of these words: CUM (cum/jizz is currently visible "
-    "in, on, or dripping from her pussy or asshole right now, regardless of whether "
-    "penetration is also happening in this same frame) or NOCUM (no such cum is currently "
-    "visible there -- whether because nothing has happened yet, she's mid-penetration with "
-    "no visible fluid, or it's been wiped/moved away since).\n"
-    "Example full answers: \"CUM\" or \"NOCUM\". Nothing else."
+    "Otherwise answer with exactly one of these words:\n"
+    "INSERTED -- a cock/toy is actively penetrating her pussy or ass right now.\n"
+    "CUM -- an actual load of cum/jizz (opaque, whitish/cloudy) is visible in, on, or "
+    "dripping from her pussy or ass right now, AND nothing is currently penetrating her. Her "
+    "own natural arousal wetness/lubrication (thin, clear, glossy) does NOT count as CUM -- "
+    "only answer CUM if it genuinely looks like a distinct load of semen, not just that "
+    "she's wet.\n"
+    "NONE -- neither of the above (e.g. oral, foreplay, a repositioning moment, just natural "
+    "wetness, or her genitals simply aren't clearly visible in this frame).\n"
+    "Example full answers: \"INSERTED\", \"CUM\", or \"NONE\". Nothing else."
 )
 
-def _parse_dense_signal(text: str) -> Tuple[bool, bool]:
-    # The model doesn't reliably stick to the single merged token "NOCUM" -- it often
-    # writes "NO CUM" as two separate words instead, which still contains a standalone
-    # "CUM" word that \bCUM\b would otherwise match. Check the negative form first.
+def _parse_dense_signal(text: str) -> Tuple[bool, str]:
+    # The model doesn't reliably stick to a single merged token -- it sometimes writes
+    # "NO CUM" as two separate words, which still contains a standalone "CUM" word that
+    # \bCUM\b would otherwise match. Check negative forms before treating it as CUM.
     t = text.upper()
     is_titlecard = "TITLECARD" in t
+    if is_titlecard:
+        return True, "NONE"
+    if re.search(r"\bINSERTED\b", t):
+        return False, "INSERTED"
     is_cum = bool(re.search(r"\bCUM\b", t)) and "NOCUM" not in t and "NO CUM" not in t
-    return is_titlecard, is_cum
+    return False, ("CUM" if is_cum else "NONE")
 
 # Broad trigger for "this video plausibly contains ejaculation onto/into a woman" --
 # deliberately wider than just the word "creampie", since content living outside the
@@ -725,17 +743,17 @@ def _count_creampies_in_frames(
     frames: List[Tuple[float, Image.Image]],
     caption_detailed,
 ) -> Tuple[int, List[str], List[Tuple[float, Image.Image]]]:
-    creampie_flags: List[Tuple[float, bool]] = []
+    frame_states: List[Tuple[float, str]] = []
     person_frames: List[Tuple[float, Image.Image]] = []
 
     for ts, img in frames:
         signal = caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=16)
-        is_titlecard, is_cum = _parse_dense_signal(signal)
-        creampie_flags.append((ts, is_cum))
+        is_titlecard, state = _parse_dense_signal(signal)
+        frame_states.append((ts, state))
         if not is_titlecard:
             person_frames.append((ts, img))
 
-    count, event_times = count_creampie_events(creampie_flags)
+    count, event_times = count_creampie_events(frame_states)
     return count, event_times, (person_frames or frames)
 
 def _caption_video_dense(
