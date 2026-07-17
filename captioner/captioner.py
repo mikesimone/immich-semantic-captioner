@@ -164,16 +164,23 @@ _SEP_REGEX = re.compile(r"\s*[\|\u2022•·–—]+\s*|\s+-\s+")
 _JUNK_FULLCAPTION_REGEXES = [re.compile(r"^watch and share .* gifs on gfycat$", re.IGNORECASE)]
 _TRAILING_HANDLE_RE = re.compile(r"\s*@[\w.]+\s*$", re.IGNORECASE)
 
-# Backstop for when the model narrates a watermark/site-name/URL despite being told not
-# to (e.g. "The watermark 'Princess69.com' is in the top right corner", "OnlyFans URL is
-# visible at the bottom"). Split on real sentence boundaries (period-followed-by-space)
-# rather than every period, since site domains like "OnlyFans.com" contain a period with
-# no following space -- a naive per-period split would chop the sentence there and leave
-# a dangling ".com/whatever" fragment behind.
+# Sentence-level junk filter, reused for a few unrelated failure modes: the model
+# narrating a watermark/site-name/URL despite being told not to (e.g. "The watermark
+# 'Princess69.com' is in the top right corner", "OnlyFans URL is visible at the bottom"),
+# and declaring the *absence* of nudity/sexual content instead of just not bringing it up
+# (e.g. "No nudity or sexual content is depicted" on an otherwise-normal meme image --
+# pure bloat that also crowds out anything actually useful for search). Split on real
+# sentence boundaries (period-followed-by-space) rather than every period, since site
+# domains like "OnlyFans.com" contain a period with no following space -- a naive
+# per-period split would chop the sentence there and leave a dangling ".com/whatever"
+# fragment behind.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _JUNK_SENTENCE_RE = re.compile(
     r"\b(?:watermarks?|logos?|onlyfans|url)\b"
-    r"|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|co|xyz|vip|me|tv)\b",
+    r"|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|co|xyz|vip|me|tv)\b"
+    r"|\bno\b.{0,40}\b(?:nudity|nude|sexual content|explicit content|genitalia|genitals)\b"
+    r"|\b(?:nudity|nude|sexual content|explicit content|genitalia|genitals)\b.{0,30}"
+    r"\b(?:not|isn't|is\s+not)\b.{0,20}\b(?:present|depicted|shown|visible)\b",
     re.IGNORECASE,
 )
 
@@ -181,6 +188,11 @@ def _strip_watermark_sentences(s: str) -> str:
     sentences = _SENTENCE_SPLIT_RE.split(s)
     kept = [sent for sent in sentences if not _JUNK_SENTENCE_RE.search(sent)]
     return " ".join(kept).strip()
+
+# Backstop for the model leaking meta-commentary about its own instructions into the
+# caption (e.g. "(Note: this is a non-sexual illustration and should be described
+# accordingly.)").
+_META_NOTE_PAREN_RE = re.compile(r"\(\s*note\s*:?[^)]*\)", re.IGNORECASE)
 
 # Backstop for the model opening with meta-commentary about the caption itself instead of
 # describing the image (e.g. "A smutty, degrading caption for the image: ...").
@@ -224,6 +236,7 @@ def clean_caption(raw: str) -> str:
         if r.match(s):
             return ""
     s = _META_PREAMBLE_RE.sub("", s).strip()
+    s = _META_NOTE_PAREN_RE.sub("", s).strip()
     s = _LEADING_PHOTO_PHRASE_RE.sub(lambda m: m.group(1), s)
     s = _strip_watermark_sentences(s)
     s = _BANNED_LABEL_PHRASE_RE.sub(lambda m: f"{m.group(1)} ", s)
@@ -385,8 +398,6 @@ _COMMON_CAPTION_RULES = (
     "- Shot framing and vantage height (close-up, low-angle, etc.) are minor details -- if you "
     "mention them at all, keep it to two or three words, not a sentence. The content itself "
     "matters far more than how it was framed.\n"
-    "- State the apparent age range of any people (e.g. \"young adult\", \"college-age\", "
-    "\"middle-aged\", \"milf\") when it's visually apparent.\n"
     "- Describe clothing specifically: what garment type it is and exactly what it covers vs. "
     "leaves bare. If an item is visually distinctive enough to identify the brand (e.g. red-"
     "soled heels are Christian Louboutin), name it.\n"
@@ -428,7 +439,13 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         f"{_COMMON_CAPTION_RULES}"
         "If NO -- it is a normal, non-sexual image -- write a normal, detailed caption in 2-4 "
         "sentences following the rules above. Do not mention sex, nudity, genitals, or bodily "
-        "fluids at all in that case, even in passing or as a comparison.\n"
+        "fluids at all in that case, even in passing or as a comparison -- and that includes "
+        "NOT saying it's absent either. Never write sentences like \"no nudity is present\", "
+        "\"no sexual content is depicted\", \"no explicit content is shown\", or similar -- if "
+        "there's nothing sexual, the caption simply never brings sex up at all, in either "
+        "direction. Also never include meta-commentary about these instructions themselves "
+        "(e.g. a parenthetical note explaining that the image is non-sexual and was described "
+        "accordingly) -- that's not part of the caption.\n"
         "If YES -- it genuinely shows nudity or sexual content -- write like you're describing "
         "it crudely to a friend, not writing a medical report. Use \"cock\", \"pussy\", \"tits\", "
         "\"ass\", \"asshole\", \"cum\", \"creampie\", \"fucking\", \"moaning\", \"dripping\", "
@@ -454,8 +471,11 @@ def build_caption_prompt(video_note: str = "", person_names: Optional[List[str]]
         "(fingers, a toy/object, a tongue, a cock). If there's any wet/glistening/dripping "
         "fluid visible on or around her genitals, ass, or mouth, call it cum -- don't hedge "
         "with vaguer words like \"moisture\", \"wetness\", or \"fluid\" instead.\n"
+        "State the apparent age range of any adult involved (e.g. \"young adult\", "
+        "\"college-age\", \"middle-aged\", \"milf\") when it's visually apparent.\n"
         "Only describe what is actually visible in this specific frame/image -- never invent "
-        "sexual content, fluids, or acts that aren't really there."
+        "sexual content, fluids, or acts that aren't really there. Never reference the photo "
+        "library's owner or any name that isn't an actual person visibly in the frame."
         + _name_instruction(person_names)
     )
 
