@@ -107,6 +107,12 @@ ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you
 USE_API_ONLY = os.environ.get("USE_API_ONLY", "true").lower() == "true"
 print(f"[config] USE_API_ONLY: {USE_API_ONLY}", flush=True)
 
+# API-only mode: optionally restrict the metadata scan to one asset type server-side
+# (e.g. "VIDEO"), so a second API-only instance can work a disjoint slice of the queue
+# (e.g. videos only) without re-scanning or re-processing what a DB-direct instance
+# elsewhere is already handling (images). Empty string = no filter, scan everything.
+API_ASSET_TYPE_FILTER = os.environ.get("API_ASSET_TYPE_FILTER", "").strip().upper()
+
 # ----------------------------
 # Identity rules (albums -> person)
 # ----------------------------
@@ -1166,24 +1172,34 @@ def get_uncaptioned_candidates_api() -> List[Dict]:
 
     while True:
         try:
+            body = {
+                "withExif": True,
+                "page": page,
+                "size": BATCH_SIZE * 5,  # Larger page size for efficiency (adjust if rate-limited)
+            }
+            if API_ASSET_TYPE_FILTER:
+                body["type"] = API_ASSET_TYPE_FILTER
             response = requests.post(
                 f"{IMMICH_URL}/api/search/metadata",
                 headers={"x-api-key": IMMICH_API_KEY, "Content-Type": "application/json"},
-                json={
-                    "withExif": True,
-                    "page": page,
-                    "size": BATCH_SIZE * 5,  # Larger page size for efficiency (adjust if rate-limited)
-                },
+                json=body,
                 timeout=30,
             )
             response.raise_for_status()
             data = response.json()
-            items = data.get("items", [])  # Immich uses "items" key
+            # Current Immich API nests results under "assets", not top-level -- verified
+            # empirically against this server (not documented consistently across versions).
+            assets = data.get("assets", {})
+            items = assets.get("items", [])
 
             if not items:
                 break
 
-            has_more = data.get("nextPage") is not None  # Reliable end-of-pagination check
+            # nextPage comes back as a JSON string (e.g. "2"), but the request schema
+            # requires "page" to be a number -- passing the raw value straight back in
+            # fails validation with a 400. Verified empirically against this server.
+            next_page_raw = assets.get("nextPage")
+            next_page = int(next_page_raw) if next_page_raw is not None else None
 
             for item in items:
                 asset_id = item.get("id")
@@ -1195,10 +1211,10 @@ def get_uncaptioned_candidates_api() -> List[Dict]:
                     candidates.append(item)
                     print(f"[api-candidate] Found uncaptioned: {asset_id}", flush=True)
 
-            if not has_more:
+            if next_page is None:
                 break
 
-            page = data["nextPage"]
+            page = next_page
             time.sleep(SLEEP_SECONDS)
         except Exception as e:
             print(f"[api-error] Pagination failed on page {page}: {e}", flush=True)
@@ -1215,13 +1231,19 @@ def get_uncaptioned_candidates_api() -> List[Dict]:
     return candidates
 
 def get_asset_albums(asset_id: str) -> List[str]:
-    """Fetch album names for an asset via API (needed in API-only mode)"""
+    """Fetch album names for an asset via API (needed in API-only mode).
+
+    GET /api/assets/{id} does NOT include album membership on this Immich version
+    (verified empirically -- AssetResponseDto has no "albums" field). The correct
+    endpoint is GET /api/albums?assetId={id}, which returns the list of albums
+    directly (each with an "albumName" field).
+    """
     try:
-        url = f"{IMMICH_URL}/api/assets/{asset_id}"
-        r = requests.get(url, headers=immich_headers(), timeout=30)
+        url = f"{IMMICH_URL}/api/albums"
+        r = requests.get(url, headers=immich_headers(), params={"assetId": asset_id}, timeout=30)
         r.raise_for_status()
         data = r.json()
-        return [album.get("albumName") for album in data.get("albums", []) if album.get("albumName")]
+        return [album.get("albumName") for album in data if album.get("albumName")]
     except Exception as e:
         print(f"[api] Failed to fetch albums for {asset_id}: {e}", flush=True)
         return []
