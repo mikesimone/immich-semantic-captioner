@@ -14,8 +14,10 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from PIL import Image
 
-import psycopg2
-import psycopg2.extras
+# psycopg2 is only needed for DB-direct mode (USE_API_ONLY=false) -- imported lazily
+# inside pg_connect()/pg_fetch_candidates() instead of here, so API-only deployments
+# (no DB access at all, e.g. a captioner instance running on a separate machine) don't
+# need a Postgres client library installed.
 
 
 # ----------------------------
@@ -1252,6 +1254,7 @@ def get_asset_albums(asset_id: str) -> List[str]:
 # Postgres helpers (ONLY used if not USE_API_ONLY)
 # ----------------------------
 def pg_connect():
+    import psycopg2
     if not PGPASSWORD:
         raise RuntimeError("PGPASSWORD is empty. Set it in the captioner container environment.")
     conn = psycopg2.connect(
@@ -1302,6 +1305,7 @@ def pg_mark_skip(conn, asset_id: str, reason: str):
         )
 
 def pg_fetch_candidates(conn, limit: int) -> List[dict]:
+    import psycopg2.extras
     has_type = pg_column_exists(conn, "asset", "type")
     select_type = 'a."type",' if has_type else "NULL::text as type,"
 
