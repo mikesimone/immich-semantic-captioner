@@ -29,6 +29,12 @@ IMMICH_API_KEY = os.environ.get("IMMICH_API_KEY", "")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 SLEEP_SECONDS = float(os.environ.get("SLEEP_SECONDS", "0.2"))
 
+# Newly-uploaded assets can be picked up as candidates before Immich's thumbnail job has
+# run, producing a 404 that's purely a timing issue rather than a real problem with the
+# asset. Retry a few times with a short delay before giving up and marking it skip.
+THUMBNAIL_RETRY_ATTEMPTS = int(os.environ.get("THUMBNAIL_RETRY_ATTEMPTS", "5"))
+THUMBNAIL_RETRY_DELAY_SECONDS = float(os.environ.get("THUMBNAIL_RETRY_DELAY_SECONDS", "10"))
+
 # How many DB candidates to fetch per poll before re-checking priority order (images
 # before videos, newest-first). Deliberately small and separate from BATCH_SIZE --
 # fetching a full BATCH_SIZE-sized batch up front would commit to working through it
@@ -692,11 +698,15 @@ class ThumbnailNotFound(Exception):
 
 def immich_get_thumbnail(asset_id: str) -> Image.Image:
     url = f"{IMMICH_URL}/api/assets/{asset_id}/thumbnail"
-    r = requests.get(url, headers=immich_headers(), timeout=120)
-    if r.status_code == 404:
-        raise ThumbnailNotFound(f"404 Not Found for url: {url}")
-    r.raise_for_status()
-    return Image.open(io.BytesIO(r.content)).convert("RGB")
+    for attempt in range(1, THUMBNAIL_RETRY_ATTEMPTS + 1):
+        r = requests.get(url, headers=immich_headers(), timeout=120)
+        if r.status_code == 404:
+            if attempt < THUMBNAIL_RETRY_ATTEMPTS:
+                time.sleep(THUMBNAIL_RETRY_DELAY_SECONDS)
+                continue
+            raise ThumbnailNotFound(f"404 Not Found for url: {url} (after {attempt} attempts)")
+        r.raise_for_status()
+        return Image.open(io.BytesIO(r.content)).convert("RGB")
 
 def immich_update_description(asset_id: str, caption: str) -> bool:
     url = f"{IMMICH_URL}/api/assets"
