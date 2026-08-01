@@ -109,6 +109,11 @@ MULTIPLE_CREAMPIE_ALBUM_ID = os.environ.get("MULTIPLE_CREAMPIE_ALBUM_ID", "e7479
 # regardless of existing album, gets added here too.
 FURRY_ALBUM_ID = os.environ.get("FURRY_ALBUM_ID", "b135f926-dd5b-4230-aa05-32bbdb2cf315")
 
+# Same idea again for lactation (milk visibly coming from the nipples/breasts) and hucow
+# (cow-print clothing/accessories) content.
+LACTATION_ALBUM_ID = os.environ.get("LACTATION_ALBUM_ID", "2921493a-b6ba-4dcd-947c-d2fd3bd12f68")
+HUCOW_ALBUM_ID = os.environ.get("HUCOW_ALBUM_ID", "d526cf69-8aed-4fdc-b93e-6dacafe7bec4")
+
 # Tagging: best-effort (won't crash if API changes)
 ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you want it
 
@@ -905,6 +910,26 @@ _CUM_TRIGGER_RE = re.compile(r"\b(cum|jizz|semen|creampie|cumshot)s?\b", re.IGNO
 # art" instruction), so this shouldn't fire on real-animal content.
 _FURRY_TRIGGER_RE = re.compile(r"\banthro(?:pomorphic)?\b|\bfurry\b", re.IGNORECASE)
 
+# Milk visibly coming from the nipples/breasts. Matches the direct e621-style term
+# ("lactating"/"lactation") as well as descriptive phrasing that doesn't use that exact
+# word ("milk leaking from her nipples", "nipples dripping milk"), by requiring "milk"
+# and "nipple"/"breast"/"tit" to co-occur within the same clause rather than firing on
+# "milk" alone (which shows up in plenty of non-lactation captions, e.g. "milky skin").
+_LACTATION_TRIGGER_RE = re.compile(
+    r"\blactat\w*\b"
+    r"|\bmilk\w*\b[^.]{0,40}\b(?:nipple|breast|tit)\w*\b"
+    r"|\b(?:nipple|breast|tit)\w*\b[^.]{0,40}\bmilk\w*\b",
+    re.IGNORECASE,
+)
+
+# Cow-print clothing/accessories (bra, panties, ears, etc.) on a real person -- distinct
+# from the furry/anthro trigger above, which is about illustrated animal-humanoid
+# characters, not real people dressed in a cow-spotted pattern.
+_HUCOW_TRIGGER_RE = re.compile(
+    r"\bcow[\s-]?print\b|\bcow[\s-]?spot(?:ted|s)?\b|\bcow[\s-]?pattern(?:ed)?\b|\bhucow\b",
+    re.IGNORECASE,
+)
+
 def _count_creampies_in_frames(
     frames: List[Tuple[float, Image.Image]],
     caption_detailed,
@@ -1444,6 +1469,12 @@ def main():
 
                 if _FURRY_TRIGGER_RE.search(caption):
                     immich_add_to_album(asset_id, FURRY_ALBUM_ID)
+
+                if _LACTATION_TRIGGER_RE.search(caption):
+                    immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
+
+                if _HUCOW_TRIGGER_RE.search(caption):
+                    immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
             else:
                 print(f"[fail] {asset_id} update failed", flush=True)
 
