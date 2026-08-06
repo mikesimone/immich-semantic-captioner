@@ -866,43 +866,49 @@ def count_creampie_events(frame_states: List[Tuple[float, str]]) -> Tuple[int, L
             was_cum = False
     return len(event_starts), event_starts
 
-# For dense (creampie-count) videos we don't want a full narrative per frame -- just a
-# cheap per-frame signal for counting, plus one detailed description of the woman from a
-# single representative frame. This short classification prompt drives that per-frame pass.
-_DENSE_SIGNAL_PROMPT = (
-    "Look at this single video frame. Answer with ONLY a short tag, nothing else -- no "
-    "sentences, no explanations, no punctuation beyond what's shown below.\n"
+# Video porn no longer gets a scene-by-scene narrative -- just a compact structured
+# summary. This cheap per-frame classifier drives that: nudity presence (to decide porn
+# vs. not), the existing INSERTED/CUM state machine (for creampie counting), plus bondage
+# and real-animal-interspecies presence, all in one small batched pass per frame.
+_VIDEO_SIGNAL_PROMPT = (
+    "Look at this single video frame. Respond with ONLY the following, nothing else -- no "
+    "other sentences or explanations.\n"
     "If this frame is just a text card, logo, watermark screen, or loading screen with no "
-    "person shown, answer exactly: TITLECARD\n"
-    "Otherwise answer with exactly one of these words:\n"
-    "INSERTED -- a cock/toy is actively penetrating her pussy or ass right now.\n"
-    "CUM -- an actual load of cum/jizz (opaque, whitish/cloudy) is visible in, on, or "
-    "dripping from her pussy or ass right now, AND nothing is currently penetrating her. Her "
-    "own natural arousal wetness/lubrication (thin, clear, glossy) does NOT count as CUM -- "
-    "only answer CUM if it genuinely looks like a distinct load of semen, not just that "
-    "she's wet.\n"
-    "NONE -- neither of the above (e.g. oral, foreplay, a repositioning moment, just natural "
-    "wetness, or her genitals simply aren't clearly visible in this frame).\n"
-    "Example full answers: \"INSERTED\", \"CUM\", or \"NONE\". Nothing else."
+    "person shown, respond with exactly: TITLECARD\n"
+    "Otherwise respond with exactly these four labeled lines, in this order:\n"
+    "NUDITY: Y or N -- Y if any bare breast, bare nipple, bare butt, or genitals are visible "
+    "right now, even partially (e.g. a nipple peeking out of clothing). Otherwise N.\n"
+    "STATE: one of INSERTED, CUM, or NONE -- INSERTED if a cock/toy is actively penetrating "
+    "her pussy or ass right now. CUM if an actual visible load of cum/jizz (opaque, "
+    "whitish/cloudy) is on or dripping from her pussy or ass right now AND nothing is "
+    "currently penetrating her (her own natural arousal wetness doesn't count). NONE "
+    "otherwise.\n"
+    "BOUND: Y or N -- Y if she is visibly tied up, chained, cuffed, or otherwise physically "
+    "restrained right now. Otherwise N.\n"
+    "SPECIES: NONE, or a single animal name (e.g. dog, horse) if a REAL (photographic, "
+    "non-illustrated, non-anthropomorphic) animal is sexually engaging with her right now. "
+    "Illustrated/anime/furry/anthro humanoid-animal characters do NOT count -- answer NONE "
+    "for those, and NONE if only humans are involved.\n"
+    "Example full answer:\nNUDITY: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE"
 )
 
-def _parse_dense_signal(text: str) -> Tuple[bool, str]:
-    # The model doesn't reliably stick to a single merged token -- it sometimes writes
-    # "NO CUM" as two separate words, which still contains a standalone "CUM" word that
-    # \bCUM\b would otherwise match. Check negative forms before treating it as CUM.
+def _parse_video_signal(text: str) -> dict:
     t = text.upper()
-    is_titlecard = "TITLECARD" in t
-    if is_titlecard:
-        return True, "NONE"
-    if re.search(r"\bINSERTED\b", t):
-        return False, "INSERTED"
-    is_cum = bool(re.search(r"\bCUM\b", t)) and "NOCUM" not in t and "NO CUM" not in t
-    return False, ("CUM" if is_cum else "NONE")
-
-# Broad trigger for "this video plausibly contains ejaculation onto/into a woman" --
-# deliberately wider than just the word "creampie", since content living outside the
-# dedicated creampie albums (Feral, Lydia, etc.) won't necessarily use that exact word.
-_CUM_TRIGGER_RE = re.compile(r"\b(cum|jizz|semen|creampie|cumshot)s?\b", re.IGNORECASE)
+    if "TITLECARD" in t:
+        return {"titlecard": True, "nudity": False, "state": "NONE", "bound": False, "species": None}
+    nudity = bool(re.search(r"NUDITY\s*:\s*Y", t))
+    if re.search(r"STATE\s*:\s*INSERTED", t):
+        state = "INSERTED"
+    elif re.search(r"STATE\s*:\s*CUM", t):
+        state = "CUM"
+    else:
+        state = "NONE"
+    bound = bool(re.search(r"BOUND\s*:\s*Y", t))
+    species = None
+    m = re.search(r"SPECIES\s*:\s*([A-Z]+)", t)
+    if m and m.group(1) != "NONE":
+        species = m.group(1).lower()
+    return {"titlecard": False, "nudity": nudity, "state": state, "bound": bound, "species": species}
 
 # Anthropomorphic/furry art -- deliberately keys off words our own prompt uses for
 # illustrated animal-humanoid characters, not real animals (which would never be
@@ -930,13 +936,10 @@ _HUCOW_TRIGGER_RE = re.compile(
     re.IGNORECASE,
 )
 
-def _count_creampies_in_frames(
+def _classify_video_frames(
     frames: List[Tuple[float, Image.Image]],
     caption_detailed,
-) -> Tuple[int, List[str], List[Tuple[float, Image.Image]]]:
-    frame_states: List[Tuple[float, str]] = []
-    person_frames: List[Tuple[float, Image.Image]] = []
-
+) -> List[dict]:
     # All frames of one video share the exact same short classifier prompt, differing
     # only by image -- an ideal, low-risk batching target (no padding complexity from
     # varying prompt lengths) that turns up to DENSE_MAX_VIDEO_FRAMES sequential
@@ -944,48 +947,51 @@ def _count_creampies_in_frames(
     batch_fn = getattr(caption_detailed, "batch", None)
     if batch_fn:
         items = [
-            {"pil_image": img, "prompt_override": _DENSE_SIGNAL_PROMPT, "max_new_tokens": 16}
+            {"pil_image": img, "prompt_override": _VIDEO_SIGNAL_PROMPT, "max_new_tokens": 48}
             for _, img in frames
         ]
-        signals = batch_fn(items)
+        raw = batch_fn(items)
     else:
-        signals = [
-            caption_detailed(img, prompt_override=_DENSE_SIGNAL_PROMPT, max_new_tokens=16)
+        raw = [
+            caption_detailed(img, prompt_override=_VIDEO_SIGNAL_PROMPT, max_new_tokens=48)
             for _, img in frames
         ]
 
-    for (ts, img), signal in zip(frames, signals):
-        is_titlecard, state = _parse_dense_signal(signal)
-        frame_states.append((ts, state))
-        if not is_titlecard:
-            person_frames.append((ts, img))
+    signals = []
+    for (ts, img), text in zip(frames, raw):
+        parsed = _parse_video_signal(text)
+        parsed["ts"] = ts
+        parsed["img"] = img
+        signals.append(parsed)
+    return signals
 
-    count, event_times = count_creampie_events(frame_states)
-    return count, event_times, (person_frames or frames)
-
-def _caption_video_dense(
-    frames: List[Tuple[float, Image.Image]],
-    caption_detailed,
-    person_names: Optional[List[str]],
-) -> Tuple[str, str]:
-    count, event_times, candidates = _count_creampies_in_frames(frames, caption_detailed)
-
-    # Pick a representative frame for the one detailed description -- the middle of
-    # whichever frames actually show a person, skipping title cards/intro screens, since
-    # a fixed "just take the middle frame" would sometimes land on an intro card instead.
-    _, desc_img = candidates[len(candidates) // 2]
-    desc_note = (
-        "This is one frame from a video. There may be more than one woman in this video -- "
-        "if more than one is visible in this specific frame, describe each of them."
+# Compact structured description for video porn -- no scene narrative, just the handful
+# of searchable facts that matter: breast size, race, and age of whichever woman/women are
+# visible. Skipping Lydia entirely is handled by the caller (based on album identity), not
+# here, since the model has no way to know who's who -- it just describes whoever it sees.
+def build_compact_person_prompt() -> str:
+    # Output is post-processed by collapsing all whitespace to single spaces (see
+    # _raw_batch_generate), so newlines can't be relied on to separate multiple women --
+    # use an explicit " | " delimiter between women instead, all on one line.
+    return (
+        "Look at this image. For every adult woman CLEARLY visible (ignore any men, and "
+        "ignore anyone only partially/ambiguously in frame), give: "
+        "<breast size>, <race>, <age>\n"
+        "- breast size: one of small, medium, large, huge\n"
+        "- race: your best guess (e.g. white, Black, Latina, Asian, Middle Eastern, mixed)\n"
+        "- age: one of young adult, middle age, old\n"
+        "If more than one woman is clearly visible, separate each woman's triplet with ' | ' "
+        "-- e.g. \"large, white, young adult | small, Black, middle age\". If only one woman "
+        "is clearly visible, give just her one triplet -- do not add extra entries for anyone "
+        "who isn't clearly visible, and never write placeholder text like \"none visible\" or "
+        "\"not visible\". Respond with ONLY the triplet(s) -- no names, no other commentary, "
+        "no extra sentences."
     )
-    woman_desc = caption_detailed(desc_img, video_note=desc_note, person_names=person_names)
 
-    plural = "creampie" if count == 1 else "creampies"
-    summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})" if count else "SUMMARY: 0 creampies detected"
-
-    parts = [summary, woman_desc]
-
-    return " || ".join(parts), "VIDEO-FRAMES-DENSE"
+# Asset-identity names for whom we already know exactly who she is from album membership --
+# describing her physically (breast size/race/age) is redundant, so we skip it entirely
+# when she's the only person identified for this asset.
+COMPACT_DESC_SKIP_NAMES = {"Lydia"}
 
 def caption_video(
     asset_id: str,
@@ -1004,29 +1010,59 @@ def caption_video(
         _, tag_frame = frames[len(frames) // 2]
         generate_and_apply_e621_tags(asset_id, tag_frame, caption_detailed)
 
-        if dense:
-            return _caption_video_dense(frames, caption_detailed, person_names)
+        signals = _classify_video_frames(frames, caption_detailed)
+        any_nudity = any(
+            (s["nudity"] or s["state"] != "NONE") for s in signals if not s["titlecard"]
+        )
+
+        if not any_nudity:
+            # Not sexual content (e.g. a family video) -- keep the old scene-by-scene
+            # narrative treatment, unchanged.
+            parts = []
+            for ts, img in frames:
+                cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
+                parts.append(f"[{format_ts(ts)}] {cap}")
+            return " || ".join(parts), "VIDEO-FRAMES"
+
+        # Porn: make sure creampie counting, bondage, and interspecies detection cover the
+        # whole runtime, not just this sampling pass -- re-scan with full dense/uniform
+        # coverage if the initial pass wasn't already dense (mirrors the old cross-listed
+        # creampie re-scan trick, just triggered by the NUDITY signal instead of a text
+        # regex on a narrative caption that no longer gets generated).
+        if not dense:
+            frames = extract_video_frames(video_path, dense=True)
+            signals = _classify_video_frames(frames, caption_detailed)
+
+        count, event_times = count_creampie_events([(s["ts"], s["state"]) for s in signals])
+        bound_ever = any(s["bound"] for s in signals)
+        species = next((s["species"] for s in signals if s["species"]), None)
+
+        # Representative frame for the compact person description -- prefer an actually-nude
+        # frame over an arbitrary one, and skip title cards/intro screens.
+        nude_frames = [(s["ts"], s["img"]) for s in signals if not s["titlecard"] and s["nudity"]]
+        candidates = nude_frames or frames
+        _, desc_img = candidates[len(candidates) // 2]
 
         parts = []
-        for ts, img in frames:
-            cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
-            parts.append(f"[{format_ts(ts)}] {cap}")
-        full_caption = " || ".join(parts)
+        if not (person_names and set(person_names) <= COMPACT_DESC_SKIP_NAMES):
+            person_desc = caption_detailed(
+                desc_img, prompt_override=build_compact_person_prompt(), max_new_tokens=80
+            ).strip()
+            if person_desc:
+                parts.append(person_desc)
 
-        # Not filed in a dedicated creampie album, but the caption itself suggests one
-        # might be present -- re-scan the same already-downloaded video at dense sampling
-        # to get an accurate count, and prepend it. Full narrative detail is kept (unlike
-        # the dedicated-album path) since for cross-listed content the rest of the scene
-        # is the primary point, not just the creampie count.
-        if _CUM_TRIGGER_RE.search(full_caption):
-            dense_frames = extract_video_frames(video_path, dense=True)
-            count, event_times, _ = _count_creampies_in_frames(dense_frames, caption_detailed)
-            if count >= 1:
-                plural = "creampie" if count == 1 else "creampies"
-                summary = f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})"
-                full_caption = f"{summary} || {full_caption}"
+        if count >= 1:
+            plural = "creampie" if count == 1 else "creampies"
+            parts.append(f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})")
 
-        return full_caption, "VIDEO-FRAMES"
+        if species:
+            parts.append(f"INTERSPECIES: {species}")
+
+        if bound_ever:
+            parts.append("BOUND: restrained")
+
+        caption = " || ".join(parts) if parts else "Explicit content -- no further detail detected."
+        return caption, "VIDEO-PORN-COMPACT"
     finally:
         try:
             os.remove(video_path)
