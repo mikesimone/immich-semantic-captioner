@@ -596,15 +596,33 @@ def load_joycaption():
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
 
+        # Classification/field-extraction prompts (video signal detection, the compact
+        # person-description triplet) want a single consistent answer, not creative variety
+        # -- temperature sampling was confirmed in testing to flip the answer to the exact
+        # same frame between runs (e.g. GENITALS: Y vs. N on 5 back-to-back calls with
+        # identical input), which is a real source of the inconsistent creampie counts seen
+        # in testing, separate from any counting-logic issue. Narrative captioning still
+        # wants temperature sampling (it's what avoids repetitive phrasing across a library),
+        # so this only switches to greedy decoding when every item in the batch opts in via
+        # "greedy": True -- callers never mix classification and narrative items in one batch.
+        greedy = bool(batch_items) and all(item.get("greedy") for item in batch_items)
         with torch.inference_mode():
-            generate_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=JOYCAPTION_TEMPERATURE,
-                top_p=0.9,
-                repetition_penalty=JOYCAPTION_REPETITION_PENALTY,
-            )
+            if greedy:
+                generate_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    repetition_penalty=JOYCAPTION_REPETITION_PENALTY,
+                )
+            else:
+                generate_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=JOYCAPTION_TEMPERATURE,
+                    top_p=0.9,
+                    repetition_penalty=JOYCAPTION_REPETITION_PENALTY,
+                )
         # Left-padding means every row's prompt occupies the same width, so the generated
         # continuation starts at the same column for every row -- no per-row offset math.
         gen_only = generate_ids[:, inputs["input_ids"].shape[1]:]
@@ -674,6 +692,7 @@ def load_joycaption():
         person_names: Optional[List[str]] = None,
         prompt_override: Optional[str] = None,
         max_new_tokens: int = 256,
+        greedy: bool = False,
     ) -> str:
         return caption_detailed_batch([{
             "pil_image": pil_image,
@@ -681,6 +700,7 @@ def load_joycaption():
             "person_names": person_names,
             "prompt_override": prompt_override,
             "max_new_tokens": max_new_tokens,
+            "greedy": greedy,
         }])[0]
 
     caption_detailed.batch = caption_detailed_batch
@@ -846,6 +866,13 @@ def is_feral_album(albums: List[str]) -> bool:
 def is_multiple_creampie_album(albums: List[str]) -> bool:
     return any("multiple creampie" in (album or "").lower() for album in (albums or []))
 
+# Furry/anthro content shouldn't get a creampie count at all -- the whole detection was
+# built and tuned around live-action photography (vagina location, cum vs. lube texture),
+# none of which reliably translates to illustrated art. Keyed off existing Furry Stuff album
+# membership rather than trying to detect it live for every frame.
+def is_furry_album(albums: List[str]) -> bool:
+    return any("furry stuff" in (album or "").lower() for album in (albums or []))
+
 def extract_video_frames(video_path: str, dense: bool = False) -> List[Tuple[float, Image.Image]]:
     duration = probe_duration_seconds(video_path)
     timestamps = compute_dense_timestamps(duration) if dense else compute_video_timestamps(duration)
@@ -941,22 +968,29 @@ _VIDEO_SIGNAL_PROMPT = (
     "PARTNER: Y or N -- Y if a male sexual partner (any part of him -- body, hand, cock, "
     "etc.) is visible anywhere in this frame with her right now, even if not currently "
     "penetrating her. N if she alone is visible with no partner in frame at all.\n"
-    "STATE: one of INSERTED, CUM, or NONE. A creampie is ONLY a penis or toy ejaculating "
-    "inside her VAGINA -- cum in her mouth, on her face, or on/in her ass/anus does NOT "
-    "count, no matter how it looks. INSERTED if a cock/toy is actively penetrating her "
-    "vagina right now. CUM if an actual visible load of cum/jizz is on or dripping from her "
-    "vagina right now AND nothing is currently penetrating it. Do NOT confuse lubricant with "
-    "cum -- this is a common mistake. Real cum is thick and white, is actively dripping or "
-    "pooling out of her, and does NOT cling to the penis/toy shaft. Lube is ALSO often thick "
-    "and white, but it stays smeared/coating the penis or toy shaft itself (visible on the "
-    "shaft when it's pulled out or during thrusting), and is typically present continuously "
-    "throughout the scene rather than only appearing after a period of sex. If the white "
-    "fluid you see is coating the shaft, or has been visible the whole time rather than only "
-    "showing up after real thrusting, that's lube -- answer NONE, not CUM. Her own natural "
-    "arousal wetness (thin, clear, glossy) also doesn't count as CUM. NONE otherwise -- this "
-    "also includes oral sex, a facial/cum on her face or in her mouth, cum on/in her ass, and "
-    "anal penetration; none of those are INSERTED or CUM, they're always NONE for this "
-    "field.\n"
+    "GENITALS: Y or N -- Y if her vagina/pussy is actually visible somewhere in this frame "
+    "right now (even partially). N if her vagina is not in view at all -- e.g. this frame "
+    "only shows her face, breasts, hands, or any other body part with her crotch out of "
+    "frame or fully covered by clothing.\n"
+    "STATE: one of INSERTED, CUM, or NONE. If GENITALS is N, STATE must always be NONE --  "
+    "you cannot see a creampie in a frame that doesn't show her vagina at all, no matter what "
+    "else is visible. A creampie is ONLY a penis or toy ejaculating inside her VAGINA -- cum "
+    "in her mouth, on her face, or on/in her ass/anus does NOT count, no matter how it looks. "
+    "Milk leaking/dripping/spraying from her nipples is NEVER cum, even though both are thin "
+    "white liquid -- milk on her breasts/chest is never STATE, it's the separate LACTATING "
+    "field below. INSERTED if a cock/toy is actively penetrating her vagina right now. CUM if "
+    "an actual visible load of cum/jizz is on or dripping from her vagina right now AND "
+    "nothing is currently penetrating it. Do NOT confuse lubricant with cum -- this is a "
+    "common mistake. Real cum is thick and white, is actively dripping or pooling out of her, "
+    "and does NOT cling to the penis/toy shaft. Lube is ALSO often thick and white, but it "
+    "stays smeared/coating the penis or toy shaft itself (visible on the shaft when it's "
+    "pulled out or during thrusting), and is typically present continuously throughout the "
+    "scene rather than only appearing after a period of sex. If the white fluid you see is "
+    "coating the shaft, or has been visible the whole time rather than only showing up after "
+    "real thrusting, that's lube -- answer NONE, not CUM. Her own natural arousal wetness "
+    "(thin, clear, glossy) also doesn't count as CUM. NONE otherwise -- this also includes "
+    "oral sex, a facial/cum on her face or in her mouth, cum on/in her ass, and anal "
+    "penetration; none of those are INSERTED or CUM, they're always NONE for this field.\n"
     "BOUND: Y or N -- Y if she is visibly tied up, chained, cuffed, or otherwise physically "
     "restrained right now. Otherwise N.\n"
     "SPECIES: NONE, or a single animal name (e.g. dog, horse) if a REAL (photographic, "
@@ -965,7 +999,7 @@ _VIDEO_SIGNAL_PROMPT = (
     "for those, and NONE if only humans are involved.\n"
     "LACTATING: Y or N -- Y if milk is visibly leaking, dripping, or spraying from her bare "
     "nipples/breasts right now. Otherwise N.\n"
-    "Example full answer:\nNUDITY: Y\nPARTNER: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE\nLACTATING: N"
+    "Example full answer:\nNUDITY: Y\nPARTNER: Y\nGENITALS: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE\nLACTATING: N"
 )
 
 def _parse_video_signal(text: str) -> dict:
@@ -977,11 +1011,18 @@ def _parse_video_signal(text: str) -> dict:
         }
     nudity = bool(re.search(r"NUDITY\s*:\s*Y", t))
     partner_visible = bool(re.search(r"PARTNER\s*:\s*Y", t))
+    genitals_visible = bool(re.search(r"GENITALS\s*:\s*Y", t))
     if re.search(r"STATE\s*:\s*INSERTED", t):
         state = "INSERTED"
     elif re.search(r"STATE\s*:\s*CUM", t):
         state = "CUM"
     else:
+        state = "NONE"
+    # Defense in depth: even though the prompt tells the model STATE must be NONE when
+    # GENITALS is N, it doesn't reliably comply -- confirmed in testing, a frame showing
+    # milk streaming from a nipple with no genitals anywhere in view was still read as
+    # STATE: CUM. Overriding here doesn't depend on the model getting that instruction right.
+    if not genitals_visible:
         state = "NONE"
     bound = bool(re.search(r"BOUND\s*:\s*Y", t))
     # Matched against a fixed vocabulary with a trailing word boundary rather than a bare
@@ -1037,13 +1078,13 @@ def _classify_video_frames(
     batch_fn = getattr(caption_detailed, "batch", None)
     if batch_fn:
         items = [
-            {"pil_image": img, "prompt_override": _VIDEO_SIGNAL_PROMPT, "max_new_tokens": 80}
+            {"pil_image": img, "prompt_override": _VIDEO_SIGNAL_PROMPT, "max_new_tokens": 100, "greedy": True}
             for _, img in frames
         ]
         raw = batch_fn(items)
     else:
         raw = [
-            caption_detailed(img, prompt_override=_VIDEO_SIGNAL_PROMPT, max_new_tokens=80)
+            caption_detailed(img, prompt_override=_VIDEO_SIGNAL_PROMPT, max_new_tokens=100, greedy=True)
             for _, img in frames
         ]
 
@@ -1118,6 +1159,7 @@ def caption_video(
     compilation: bool = False,
     feral: bool = False,
     multiple: bool = False,
+    furry: bool = False,
 ) -> Tuple[str, str]:
     fd, video_path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
@@ -1153,11 +1195,29 @@ def caption_video(
             frames = extract_video_frames(video_path, dense=True)
             signals = _classify_video_frames(frames, caption_detailed)
 
-        if feral or not multiple:
+        if furry:
+            # No creampie count at all for furry/anthro content -- the detection was built
+            # around live-action photography and doesn't reliably apply to illustrated art.
+            count, event_times = 0, []
+        elif feral or not multiple:
             # Assume at most one creampie for anything not already manually placed in the
             # Multiple Creampie album (feral overrides even that placement) -- just detect
-            # whether one happened at all, don't try to count how many.
-            cum_ts = next((s["ts"] for s in signals if s["state"] == "CUM"), None)
+            # whether one happened at all, don't try to count how many. An isolated CUM
+            # reading with no INSERTED evidence anywhere earlier in the video is much more
+            # likely a misclassified non-sexual frame than a real creampie -- confirmed in
+            # testing, a fully-clothed dialogue scene at the start of a video was confidently
+            # (and repeatably, under greedy decoding) misread as CUM, while the real creampie
+            # much later sat inside an actual cluster of INSERTED/CUM readings. Requiring a
+            # prior INSERTED sighting filters out the isolated false positives without
+            # needing the CUM reading itself to ever be more reliable.
+            cum_ts = None
+            seen_insertion = False
+            for s in signals:
+                if s["state"] == "INSERTED":
+                    seen_insertion = True
+                elif s["state"] == "CUM" and seen_insertion:
+                    cum_ts = s["ts"]
+                    break
             count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
         else:
             count, event_times = count_creampie_events(
@@ -1177,7 +1237,7 @@ def caption_video(
         breasts, races, ages = [], [], []
         if not (person_names and set(person_names) <= COMPACT_DESC_SKIP_NAMES):
             person_desc = caption_detailed(
-                desc_img, prompt_override=build_compact_person_prompt(), max_new_tokens=80
+                desc_img, prompt_override=build_compact_person_prompt(), max_new_tokens=80, greedy=True
             ).strip()
             if person_desc:
                 breasts, races, ages = _parse_person_desc(person_desc)
@@ -1616,9 +1676,10 @@ def main():
                 compilation = is_compilation_album(albums)
                 feral = is_feral_album(albums)
                 multiple = is_multiple_creampie_album(albums)
+                furry = is_furry_album(albums)
                 raw_caption, mode = caption_video(
                     asset_id, caption_detailed, person_names=person_names, dense=dense,
-                    compilation=compilation, feral=feral, multiple=multiple,
+                    compilation=compilation, feral=feral, multiple=multiple, furry=furry,
                 )
             else:
                 if prefetched_thumbnail_error is not None:
