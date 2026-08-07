@@ -10,12 +10,12 @@ Run inside the captioner container (needs the loaded JoyCaption model + GPU):
     docker exec -i immich_captioner python3 - < scripts/test_compact_video_caption.py
 """
 import sys
-import datetime
 
 sys.path.insert(0, "/app")
 from captioner import (  # noqa: E402
     IMMICH_URL,
     immich_headers,
+    immich_set_date_taken_now,
     load_joycaption,
     caption_video,
     get_asset_albums,
@@ -53,20 +53,9 @@ def get_album_videos(album_id: str, n: int):
 
 
 def mark_test_asset(asset_id: str) -> None:
-    # Tag test-sampled assets with today's date so they're easy to find later -- this sets
-    # the EXIF "Date Taken" field (dateTimeOriginal), which does persist and shows in the
-    # asset's info panel, but does NOT propagate to fileCreatedAt/localDateTime (the fields
-    # that govern the main timeline's chronological position and takenAfter/takenBefore
-    # search filters -- verified empirically against this Immich version, v3.1.0).
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    r = requests.put(
-        f"{IMMICH_URL}/api/assets",
-        headers={**immich_headers(), "Content-Type": "application/json"},
-        json={"ids": [asset_id], "dateTimeOriginal": today},
-        timeout=30,
-    )
-    if r.status_code >= 300:
-        print(f"[mark] failed to date-stamp {asset_id}: {r.status_code} {r.text}", flush=True)
+    # Stamp test-sampled assets with the current time so they're easy to find afterward --
+    # same "Date Taken" stamping the main script applies to porn it captions.
+    immich_set_date_taken_now(asset_id)
 
 
 def main():
