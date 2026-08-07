@@ -897,7 +897,6 @@ def format_ts(seconds: float) -> str:
 
 def count_creampie_events(
     frame_states: List[Tuple[float, str, bool]],
-    require_partner_absence: bool = True,
     min_gap_seconds: float = 60.0,
 ) -> Tuple[int, List[str]]:
     # frame_states is already in chronological sample order: (timestamp, STATE, partner_visible)
@@ -908,6 +907,11 @@ def count_creampie_events(
     # sighting as its own event doesn't work either: cum can go in and out of view purely from
     # a camera angle or position change with no new ejaculation involved.
     #
+    # Only reached for content manually placed in Multiple Creampie and not also in a
+    # compilation album (compilation membership skips creampie detection entirely -- see
+    # caption_video) -- i.e. genuinely "one woman, multiple creampies in one continuous
+    # encounter," never a compilation of different women cut together.
+    #
     # "Multiple creampies" specifically means multiple DIFFERENT men, not just multiple times
     # cum became visible -- ordinary continued sex after the real creampie (same man, still in
     # frame) is completely normal and must not count as a second round, no matter how many
@@ -915,39 +919,29 @@ def count_creampie_events(
     # alone isn't reliable evidence he actually left, though -- porn cinematography constantly
     # crops the man's body out of frame for close-ups even mid-scene with the same guy the
     # whole time (confirmed in testing: using that signal alone made a known-bad case *worse*,
-    # 12 events up to 18). So a new event now requires BOTH real elapsed time (min_gap_seconds)
+    # 12 events up to 18). So a new event requires BOTH real elapsed time (min_gap_seconds)
     # since the last counted event AND at least one sampled frame where she was genuinely alone
     # during that gap -- either condition alone was too permissive on its own.
-    #
-    # Compilation-style albums are the exception: those are edited from separately-filmed
-    # clips spliced together, often with hard cuts straight into the next scene with no frame
-    # where she's alone in between -- require_partner_absence=False there falls back to just
-    # requiring a fresh INSERTED reading, since rapid-fire distinct events there are real.
     event_starts_raw: List[float] = []
     was_cum = False
     seen_alone_since_last_event = False
-    seen_insertion_since_last_event = False
     for ts, state, partner_visible in frame_states:
         if not partner_visible:
             seen_alone_since_last_event = True
         if state == "INSERTED":
-            seen_insertion_since_last_event = True
             was_cum = False
         elif state == "CUM":
             if not was_cum:
-                if not event_starts_raw:
-                    had_scene_break = True
-                elif require_partner_absence:
-                    had_scene_break = (
+                had_scene_break = (
+                    not event_starts_raw
+                    or (
                         seen_alone_since_last_event
                         and (ts - event_starts_raw[-1]) >= min_gap_seconds
                     )
-                else:
-                    had_scene_break = seen_insertion_since_last_event
+                )
                 if had_scene_break:
                     event_starts_raw.append(ts)
                     seen_alone_since_last_event = False
-                    seen_insertion_since_last_event = False
             was_cum = True
         else:
             was_cum = False
@@ -1195,9 +1189,18 @@ def caption_video(
             frames = extract_video_frames(video_path, dense=True)
             signals = _classify_video_frames(frames, caption_detailed)
 
-        if furry:
+        if furry or compilation:
             # No creampie count at all for furry/anthro content -- the detection was built
             # around live-action photography and doesn't reliably apply to illustrated art.
+            #
+            # Compilation content is a different thing entirely from Multiple Creampie, not
+            # a looser version of it: a compilation cuts between DIFFERENT women each getting
+            # creampied once, edited together to skip to the good part -- there's no single
+            # "how many creampies did she get" answer to compute, and it's never a "just one
+            # creampie" video either (confirmed: a compilation got auto-filed into Single
+            # Creampie, and a compilation manually placed in Multiple Creampie got a bogus
+            # per-woman event count). So compilation membership skips creampie detection
+            # unconditionally, the same as furry, regardless of Multiple Creampie placement.
             count, event_times = 0, []
         elif feral or not multiple:
             # Assume at most one creampie for anything not already manually placed in the
@@ -1210,19 +1213,31 @@ def caption_video(
             # much later sat inside an actual cluster of INSERTED/CUM readings. Requiring a
             # prior INSERTED sighting filters out the isolated false positives without
             # needing the CUM reading itself to ever be more reliable.
+            #
+            # Also require a partner to have been seen at some point -- INSERTED alone isn't
+            # enough evidence, since it fires on toy penetration too, and solo masturbation
+            # can't produce a real creampie no matter how wet things get (confirmed: a solo
+            # video with no partner in any frame still got a creampie detected).
+            #
+            # Take the LAST qualifying sighting, not the first: in a real single-creampie
+            # video, the creampie itself is near the end (guys stop after they cum), so the
+            # latest CUM reading with insertion evidence behind it is the best estimate of
+            # the real moment, and it also naturally loses to any earlier isolated false
+            # positive if a later, better-supported reading exists.
             cum_ts = None
             seen_insertion = False
+            seen_partner = False
             for s in signals:
+                if s["partner_visible"]:
+                    seen_partner = True
                 if s["state"] == "INSERTED":
                     seen_insertion = True
-                elif s["state"] == "CUM" and seen_insertion:
+                elif s["state"] == "CUM" and seen_insertion and seen_partner:
                     cum_ts = s["ts"]
-                    break
             count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
         else:
             count, event_times = count_creampie_events(
-                [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
-                require_partner_absence=not compilation,
+                [(s["ts"], s["state"], s["partner_visible"]) for s in signals]
             )
         bound_ever = any(s["bound"] for s in signals)
         species = next((s["species"] for s in signals if s["species"]), None)

@@ -10,6 +10,7 @@ Run inside the captioner container (needs the loaded JoyCaption model + GPU):
     docker exec -i immich_captioner python3 - < scripts/test_compact_video_caption.py
 """
 import sys
+import datetime
 
 sys.path.insert(0, "/app")
 from captioner import (  # noqa: E402
@@ -23,6 +24,7 @@ from captioner import (  # noqa: E402
     is_compilation_album,
     is_feral_album,
     is_multiple_creampie_album,
+    is_furry_album,
 )
 import requests
 
@@ -34,7 +36,7 @@ ALBUMS = {
     "Creampie Compilation": "090261d8-dd49-48a0-8c48-9be74f67ee90",
 }
 
-N_PER_ALBUM = 5
+N_PER_ALBUM = 2
 
 
 def get_album_videos(album_id: str, n: int):
@@ -50,6 +52,23 @@ def get_album_videos(album_id: str, n: int):
     return r.json().get("assets", {}).get("items", [])
 
 
+def mark_test_asset(asset_id: str) -> None:
+    # Tag test-sampled assets with today's date so they're easy to find later -- this sets
+    # the EXIF "Date Taken" field (dateTimeOriginal), which does persist and shows in the
+    # asset's info panel, but does NOT propagate to fileCreatedAt/localDateTime (the fields
+    # that govern the main timeline's chronological position and takenAfter/takenBefore
+    # search filters -- verified empirically against this Immich version, v3.1.0).
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    r = requests.put(
+        f"{IMMICH_URL}/api/assets",
+        headers={**immich_headers(), "Content-Type": "application/json"},
+        json={"ids": [asset_id], "dateTimeOriginal": today},
+        timeout=30,
+    )
+    if r.status_code >= 300:
+        print(f"[mark] failed to date-stamp {asset_id}: {r.status_code} {r.text}", flush=True)
+
+
 def main():
     print("[test] loading JoyCaption...", flush=True)
     caption_detailed = load_joycaption()
@@ -62,17 +81,19 @@ def main():
             continue
         for v in videos:
             asset_id = v["id"]
+            mark_test_asset(asset_id)
             albums = get_asset_albums(asset_id)
             person_names = extract_identities_from_albums(albums)
             dense = is_dense_sampling_album(albums)
             compilation = is_compilation_album(albums)
             feral = is_feral_album(albums)
             multiple = is_multiple_creampie_album(albums)
-            print(f"\n--- {asset_id} (dense={dense}, compilation={compilation}, feral={feral}, multiple={multiple}, person_names={person_names}) ---", flush=True)
+            furry = is_furry_album(albums)
+            print(f"\n--- {asset_id} (dense={dense}, compilation={compilation}, feral={feral}, multiple={multiple}, furry={furry}, person_names={person_names}) ---", flush=True)
             try:
                 caption, mode = caption_video(
                     asset_id, caption_detailed, person_names=person_names, dense=dense,
-                    compilation=compilation, feral=feral, multiple=multiple,
+                    compilation=compilation, feral=feral, multiple=multiple, furry=furry,
                 )
                 print(f"[{mode}] {caption}", flush=True)
             except Exception as e:
