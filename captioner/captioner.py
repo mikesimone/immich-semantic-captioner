@@ -99,11 +99,11 @@ DENSE_SAMPLING_ALBUM_KEYWORDS = os.environ.get("DENSE_SAMPLING_ALBUM_KEYWORDS", 
 DENSE_INTERVAL_SECONDS = float(os.environ.get("DENSE_INTERVAL_SECONDS", "2"))
 DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "120"))
 
-# Auto-filing: any video, regardless of which album it's manually sorted into, gets added
-# to one of these based on its detected creampie count (in addition to its existing
-# albums, never removing it from anywhere).
+# Auto-filing: any video with a detected creampie, regardless of which album it's manually
+# sorted into, gets added here (in addition to its existing albums, never removing it from
+# anywhere) -- unless it's already been manually placed in Multiple Creampie, which the
+# captioner never adds to or removes from (see is_multiple_creampie_album).
 SINGLE_CREAMPIE_ALBUM_ID = os.environ.get("SINGLE_CREAMPIE_ALBUM_ID", "3a22144e-143c-4f43-a508-8b3f7fadbcb5")
-MULTIPLE_CREAMPIE_ALBUM_ID = os.environ.get("MULTIPLE_CREAMPIE_ALBUM_ID", "e7479905-44b5-42ca-86d0-aaf8fb7c36e3")
 
 # Same idea for furry/anthro content -- any image or video whose caption indicates it,
 # regardless of existing album, gets added here too.
@@ -836,6 +836,16 @@ def is_compilation_album(albums: List[str]) -> bool:
 def is_feral_album(albums: List[str]) -> bool:
     return any("feral on human" in (album or "").lower() for album in (albums or []))
 
+# Per explicit instruction: multi-event creampie counting is expensive to get right and
+# error-prone (false positives from lube being misread as cum, scene-break ambiguity), so
+# it's now opt-in rather than something the captioner tries to detect on its own. Every video
+# is assumed to have at most one creampie UNLESS it's already been manually placed in the
+# Multiple Creampie album -- the counting logic only runs for those. New multi-creampie
+# uploads are handled by the human moving them into that album and clearing the description
+# before the captioner ever sees them, not by the captioner guessing.
+def is_multiple_creampie_album(albums: List[str]) -> bool:
+    return any("multiple creampie" in (album or "").lower() for album in (albums or []))
+
 def extract_video_frames(video_path: str, dense: bool = False) -> List[Tuple[float, Image.Image]]:
     duration = probe_duration_seconds(video_path)
     timestamps = compute_dense_timestamps(duration) if dense else compute_video_timestamps(duration)
@@ -859,52 +869,60 @@ def format_ts(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 def count_creampie_events(
-    frame_states: List[Tuple[float, str]],
+    frame_states: List[Tuple[float, str, bool]],
+    require_partner_absence: bool = True,
     min_gap_seconds: float = 60.0,
 ) -> Tuple[int, List[str]]:
-    # frame_states is already in chronological sample order: one of INSERTED/CUM/NONE per
-    # frame. A single still frame can't show the *instant* of pulling out -- that's a
-    # motion, not a static visual state -- so we don't ask the model to recognize that
-    # moment directly, and counting every fresh "cum visible" sighting as its own event
-    # doesn't work either: cum can go in and out of view purely from a camera angle or
-    # position change with no new ejaculation involved.
+    # frame_states is already in chronological sample order: (timestamp, STATE, partner_visible)
+    # per frame, where STATE is one of INSERTED/CUM/NONE and partner_visible says whether a
+    # male partner is anywhere in frame with her right now. A single still frame can't show
+    # the *instant* of pulling out -- that's motion, not a static visual state -- so we don't
+    # ask the model to recognize that moment directly, and counting every fresh "cum visible"
+    # sighting as its own event doesn't work either: cum can go in and out of view purely from
+    # a camera angle or position change with no new ejaculation involved.
     #
-    # Requiring "a fresh INSERTED frame since the last counted event" (the previous version
-    # of this logic) isn't a strong enough bar: real scenes routinely keep thrusting for a
-    # while *after* the actual creampie, without a new load -- that's completely normal, not
-    # evidence of a second round, but it does produce genuine fresh INSERTED readings, which
-    # let the same existing cum becoming visible again later get miscounted as a new event
-    # (confirmed in testing: a video correctly filed as "Single Creampie" came back showing
-    # 12 separate events, all real INSERTED/CUM readings, just not new ejaculations).
+    # "Multiple creampies" specifically means multiple DIFFERENT men, not just multiple times
+    # cum became visible -- ordinary continued sex after the real creampie (same man, still in
+    # frame) is completely normal and must not count as a second round, no matter how many
+    # times the existing load becomes visible again during it. A single "partner absent" frame
+    # alone isn't reliable evidence he actually left, though -- porn cinematography constantly
+    # crops the man's body out of frame for close-ups even mid-scene with the same guy the
+    # whole time (confirmed in testing: using that signal alone made a known-bad case *worse*,
+    # 12 events up to 18). So a new event now requires BOTH real elapsed time (min_gap_seconds)
+    # since the last counted event AND at least one sampled frame where she was genuinely alone
+    # during that gap -- either condition alone was too permissive on its own.
     #
-    # So a new event now requires real evidence of a scene break: a stretch of at least
-    # min_gap_seconds where the state was genuinely NONE (neither inserted nor cum visible)
-    # since the last counted event, not just some intervening INSERTED frame. Ordinary
-    # continued sex after a creampie rarely produces a sustained NONE reading (the camera
-    # stays on the action), so this should no longer fire on it; an actual cut to a new
-    # position/partner, or a title card between compilation clips, will. Pass
-    # min_gap_seconds=0 for compilation-style content, where rapid-fire distinct events are
-    # real and this scene-break requirement would wrongly suppress most of them.
+    # Compilation-style albums are the exception: those are edited from separately-filmed
+    # clips spliced together, often with hard cuts straight into the next scene with no frame
+    # where she's alone in between -- require_partner_absence=False there falls back to just
+    # requiring a fresh INSERTED reading, since rapid-fire distinct events there are real.
     event_starts_raw: List[float] = []
     was_cum = False
-    clean_since_ts: Optional[float] = None
-    for ts, state in frame_states:
+    seen_alone_since_last_event = False
+    seen_insertion_since_last_event = False
+    for ts, state, partner_visible in frame_states:
+        if not partner_visible:
+            seen_alone_since_last_event = True
         if state == "INSERTED":
+            seen_insertion_since_last_event = True
             was_cum = False
         elif state == "CUM":
             if not was_cum:
-                had_scene_break = (
-                    not event_starts_raw
-                    or min_gap_seconds <= 0
-                    or (clean_since_ts is not None and (ts - clean_since_ts) >= min_gap_seconds)
-                )
+                if not event_starts_raw:
+                    had_scene_break = True
+                elif require_partner_absence:
+                    had_scene_break = (
+                        seen_alone_since_last_event
+                        and (ts - event_starts_raw[-1]) >= min_gap_seconds
+                    )
+                else:
+                    had_scene_break = seen_insertion_since_last_event
                 if had_scene_break:
                     event_starts_raw.append(ts)
-                    clean_since_ts = None
+                    seen_alone_since_last_event = False
+                    seen_insertion_since_last_event = False
             was_cum = True
         else:
-            if clean_since_ts is None:
-                clean_since_ts = ts
             was_cum = False
     return len(event_starts_raw), [format_ts(ts) for ts in event_starts_raw]
 
@@ -917,17 +935,28 @@ _VIDEO_SIGNAL_PROMPT = (
     "other sentences or explanations.\n"
     "If this frame is just a text card, logo, watermark screen, or loading screen with no "
     "person shown, respond with exactly: TITLECARD\n"
-    "Otherwise respond with exactly these five labeled lines, in this order:\n"
+    "Otherwise respond with exactly these six labeled lines, in this order:\n"
     "NUDITY: Y or N -- Y if any bare breast, bare nipple, bare butt, or genitals are visible "
     "right now, even partially (e.g. a nipple peeking out of clothing). Otherwise N.\n"
+    "PARTNER: Y or N -- Y if a male sexual partner (any part of him -- body, hand, cock, "
+    "etc.) is visible anywhere in this frame with her right now, even if not currently "
+    "penetrating her. N if she alone is visible with no partner in frame at all.\n"
     "STATE: one of INSERTED, CUM, or NONE. A creampie is ONLY a penis or toy ejaculating "
     "inside her VAGINA -- cum in her mouth, on her face, or on/in her ass/anus does NOT "
     "count, no matter how it looks. INSERTED if a cock/toy is actively penetrating her "
-    "vagina right now. CUM if an actual visible load of cum/jizz (opaque, whitish/cloudy) is "
-    "on or dripping from her vagina right now AND nothing is currently penetrating it (her "
-    "own natural arousal wetness doesn't count). NONE otherwise -- this includes oral sex, "
-    "a facial/cum on her face or in her mouth, cum on/in her ass, and anal penetration; none "
-    "of those are INSERTED or CUM, they're always NONE for this field.\n"
+    "vagina right now. CUM if an actual visible load of cum/jizz is on or dripping from her "
+    "vagina right now AND nothing is currently penetrating it. Do NOT confuse lubricant with "
+    "cum -- this is a common mistake. Real cum is thick and white, is actively dripping or "
+    "pooling out of her, and does NOT cling to the penis/toy shaft. Lube is ALSO often thick "
+    "and white, but it stays smeared/coating the penis or toy shaft itself (visible on the "
+    "shaft when it's pulled out or during thrusting), and is typically present continuously "
+    "throughout the scene rather than only appearing after a period of sex. If the white "
+    "fluid you see is coating the shaft, or has been visible the whole time rather than only "
+    "showing up after real thrusting, that's lube -- answer NONE, not CUM. Her own natural "
+    "arousal wetness (thin, clear, glossy) also doesn't count as CUM. NONE otherwise -- this "
+    "also includes oral sex, a facial/cum on her face or in her mouth, cum on/in her ass, and "
+    "anal penetration; none of those are INSERTED or CUM, they're always NONE for this "
+    "field.\n"
     "BOUND: Y or N -- Y if she is visibly tied up, chained, cuffed, or otherwise physically "
     "restrained right now. Otherwise N.\n"
     "SPECIES: NONE, or a single animal name (e.g. dog, horse) if a REAL (photographic, "
@@ -936,17 +965,18 @@ _VIDEO_SIGNAL_PROMPT = (
     "for those, and NONE if only humans are involved.\n"
     "LACTATING: Y or N -- Y if milk is visibly leaking, dripping, or spraying from her bare "
     "nipples/breasts right now. Otherwise N.\n"
-    "Example full answer:\nNUDITY: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE\nLACTATING: N"
+    "Example full answer:\nNUDITY: Y\nPARTNER: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE\nLACTATING: N"
 )
 
 def _parse_video_signal(text: str) -> dict:
     t = text.upper()
     if "TITLECARD" in t:
         return {
-            "titlecard": True, "nudity": False, "state": "NONE", "bound": False,
-            "species": None, "lactating": False,
+            "titlecard": True, "nudity": False, "partner_visible": False, "state": "NONE",
+            "bound": False, "species": None, "lactating": False,
         }
     nudity = bool(re.search(r"NUDITY\s*:\s*Y", t))
+    partner_visible = bool(re.search(r"PARTNER\s*:\s*Y", t))
     if re.search(r"STATE\s*:\s*INSERTED", t):
         state = "INSERTED"
     elif re.search(r"STATE\s*:\s*CUM", t):
@@ -966,8 +996,8 @@ def _parse_video_signal(text: str) -> dict:
         species = m.group(1).lower()
     lactating = bool(re.search(r"LACTATING\s*:\s*Y", t))
     return {
-        "titlecard": False, "nudity": nudity, "state": state, "bound": bound,
-        "species": species, "lactating": lactating,
+        "titlecard": False, "nudity": nudity, "partner_visible": partner_visible, "state": state,
+        "bound": bound, "species": species, "lactating": lactating,
     }
 
 # Anthropomorphic/furry art -- deliberately keys off words our own prompt uses for
@@ -1007,13 +1037,13 @@ def _classify_video_frames(
     batch_fn = getattr(caption_detailed, "batch", None)
     if batch_fn:
         items = [
-            {"pil_image": img, "prompt_override": _VIDEO_SIGNAL_PROMPT, "max_new_tokens": 64}
+            {"pil_image": img, "prompt_override": _VIDEO_SIGNAL_PROMPT, "max_new_tokens": 80}
             for _, img in frames
         ]
         raw = batch_fn(items)
     else:
         raw = [
-            caption_detailed(img, prompt_override=_VIDEO_SIGNAL_PROMPT, max_new_tokens=48)
+            caption_detailed(img, prompt_override=_VIDEO_SIGNAL_PROMPT, max_new_tokens=80)
             for _, img in frames
         ]
 
@@ -1087,6 +1117,7 @@ def caption_video(
     dense: bool = False,
     compilation: bool = False,
     feral: bool = False,
+    multiple: bool = False,
 ) -> Tuple[str, str]:
     fd, video_path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
@@ -1122,13 +1153,16 @@ def caption_video(
             frames = extract_video_frames(video_path, dense=True)
             signals = _classify_video_frames(frames, caption_detailed)
 
-        if feral:
+        if feral or not multiple:
+            # Assume at most one creampie for anything not already manually placed in the
+            # Multiple Creampie album (feral overrides even that placement) -- just detect
+            # whether one happened at all, don't try to count how many.
             cum_ts = next((s["ts"] for s in signals if s["state"] == "CUM"), None)
             count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
         else:
-            min_gap = 0.0 if compilation else 60.0
             count, event_times = count_creampie_events(
-                [(s["ts"], s["state"]) for s in signals], min_gap_seconds=min_gap
+                [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
+                require_partner_absence=not compilation,
             )
         bound_ever = any(s["bound"] for s in signals)
         species = next((s["species"] for s in signals if s["species"]), None)
@@ -1581,9 +1615,10 @@ def main():
                 dense = is_dense_sampling_album(albums)
                 compilation = is_compilation_album(albums)
                 feral = is_feral_album(albums)
+                multiple = is_multiple_creampie_album(albums)
                 raw_caption, mode = caption_video(
                     asset_id, caption_detailed, person_names=person_names, dense=dense,
-                    compilation=compilation, feral=feral,
+                    compilation=compilation, feral=feral, multiple=multiple,
                 )
             else:
                 if prefetched_thumbnail_error is not None:
@@ -1630,14 +1665,16 @@ def main():
                     print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
 
                 if asset_type == "VIDEO":
+                    # Multiple Creampie membership is purely manual now (see
+                    # is_multiple_creampie_album) -- the captioner never adds an asset to it
+                    # and never moves an asset out of it, only files newly-detected creampies
+                    # into Single Creampie for anything not already placed there by hand.
                     count_match = re.search(r"Separate Creampies\s*\|\s*(\d+)", caption, re.IGNORECASE)
-                    if count_match:
+                    if count_match and not multiple:
                         n = int(count_match.group(1))
-                        target = SINGLE_CREAMPIE_ALBUM_ID if n == 1 else MULTIPLE_CREAMPIE_ALBUM_ID if n >= 2 else None
-                        if target:
-                            immich_add_to_album(asset_id, target)
-                            if target == SINGLE_CREAMPIE_ALBUM_ID:
-                                immich_archive(asset_id)
+                        if n >= 1:
+                            immich_add_to_album(asset_id, SINGLE_CREAMPIE_ALBUM_ID)
+                            immich_archive(asset_id)
 
                 if _FURRY_TRIGGER_RE.search(caption):
                     immich_add_to_album(asset_id, FURRY_ALBUM_ID)
