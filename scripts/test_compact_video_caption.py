@@ -22,6 +22,7 @@ from captioner import (  # noqa: E402
     is_dense_sampling_album,
     is_compilation_album,
     is_feral_album,
+    is_multiple_creampie_album,
 )
 import requests
 
@@ -66,11 +67,12 @@ def main():
             dense = is_dense_sampling_album(albums)
             compilation = is_compilation_album(albums)
             feral = is_feral_album(albums)
-            print(f"\n--- {asset_id} (dense={dense}, compilation={compilation}, feral={feral}, person_names={person_names}) ---", flush=True)
+            multiple = is_multiple_creampie_album(albums)
+            print(f"\n--- {asset_id} (dense={dense}, compilation={compilation}, feral={feral}, multiple={multiple}, person_names={person_names}) ---", flush=True)
             try:
                 caption, mode = caption_video(
                     asset_id, caption_detailed, person_names=person_names, dense=dense,
-                    compilation=compilation, feral=feral,
+                    compilation=compilation, feral=feral, multiple=multiple,
                 )
                 print(f"[{mode}] {caption}", flush=True)
             except Exception as e:
