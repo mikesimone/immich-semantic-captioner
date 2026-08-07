@@ -10,6 +10,8 @@ from captioner import (  # noqa: E402
     get_asset_albums,
     extract_identities_from_albums,
     is_dense_sampling_album,
+    is_compilation_album,
+    is_feral_album,
 )
 
 ASSET_IDS = sys.argv[1:]
@@ -23,9 +25,14 @@ def main():
         albums = get_asset_albums(asset_id)
         person_names = extract_identities_from_albums(albums)
         dense = is_dense_sampling_album(albums)
-        print(f"\n--- {asset_id} (albums={albums}, dense={dense}, person_names={person_names}) ---", flush=True)
+        compilation = is_compilation_album(albums)
+        feral = is_feral_album(albums)
+        print(f"\n--- {asset_id} (albums={albums}, dense={dense}, compilation={compilation}, feral={feral}, person_names={person_names}) ---", flush=True)
         try:
-            caption, mode = caption_video(asset_id, caption_detailed, person_names=person_names, dense=dense)
+            caption, mode = caption_video(
+                asset_id, caption_detailed, person_names=person_names, dense=dense,
+                compilation=compilation, feral=feral,
+            )
             print(f"[{mode}] {caption}", flush=True)
         except Exception as e:
             print(f"[error] {asset_id}: {e}", flush=True)

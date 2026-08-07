@@ -466,10 +466,14 @@ _COMMON_CAPTION_RULES = (
     "there's other text baked into the image itself (a meme caption, speech bubble, etc.) that "
     "is NOT a watermark or site name, transcribe it.\n"
     "- If this is illustrated/animated art rather than a photo of a real person, and you "
-    "recognize the character as a specific fictional or franchise character, name them -- "
-    "but ALSO always state their species/type explicitly (e.g. \"anthropomorphic dog\", "
-    "\"anthro fox\", \"furry\") even when the name alone would tell a fan who they are. "
-    "Never rely on the name by itself to convey that.\n"
+    "recognize the character as a specific fictional or franchise character, name them. If, "
+    "and ONLY if, the character actually has visible non-human animal features (animal ears, "
+    "a muzzle/snout, a tail, paws, fur covering the body, etc.), ALSO state their species/"
+    "type explicitly (e.g. \"anthropomorphic dog\", \"anthro fox\", \"furry\") even when the "
+    "name alone would tell a fan who they are -- never rely on the name by itself to convey "
+    "that. Do NOT call an ordinary human-looking illustrated/anime/cartoon character "
+    "\"anthro\" or \"furry\" -- those words are ONLY for characters with real animal "
+    "features, never just because something is a cartoon or illustration.\n"
     "- Where it fits, use the same terms e621/Rule34 taggers use for acts, kinks, species, or "
     "fetish elements (e.g. \"paizuri\", \"gangbang\", \"bukkake\", \"futanari\") instead of "
     "vaguer plain-English phrasing.\n"
@@ -817,6 +821,21 @@ def is_dense_sampling_album(albums: List[str]) -> bool:
             return True
     return False
 
+# Compilation-style albums (e.g. "Creampie Compilation") are the one place multiple
+# distinct creampies genuinely happen within seconds of each other -- everywhere else that
+# pattern is classifier jitter, so the minimum-gap dedup in count_creampie_events gets
+# disabled only for these.
+def is_compilation_album(albums: List[str]) -> bool:
+    return any("compilation" in (album or "").lower() for album in (albums or []))
+
+# A real feral-on-human creampie plays out over several minutes (mount, tie, knot), which
+# defeats the event-counting heuristic entirely -- there's no reliable "scene break" signal
+# to find within one continuous encounter. Per explicit instruction: just assume exactly one
+# creampie for this content and skip multi-event counting altogether; a genuine feral
+# gangbang (if one ever turns up) gets corrected by hand.
+def is_feral_album(albums: List[str]) -> bool:
+    return any("feral on human" in (album or "").lower() for album in (albums or []))
+
 def extract_video_frames(video_path: str, dense: bool = False) -> List[Tuple[float, Image.Image]]:
     duration = probe_duration_seconds(video_path)
     timestamps = compute_dense_timestamps(duration) if dense else compute_video_timestamps(duration)
@@ -839,32 +858,55 @@ def format_ts(seconds: float) -> str:
     s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
 
-def count_creampie_events(frame_states: List[Tuple[float, str]]) -> Tuple[int, List[str]]:
+def count_creampie_events(
+    frame_states: List[Tuple[float, str]],
+    min_gap_seconds: float = 60.0,
+) -> Tuple[int, List[str]]:
     # frame_states is already in chronological sample order: one of INSERTED/CUM/NONE per
     # frame. A single still frame can't show the *instant* of pulling out -- that's a
     # motion, not a static visual state -- so we don't ask the model to recognize that
     # moment directly, and counting every fresh "cum visible" sighting as its own event
     # doesn't work either: cum can go in and out of view purely from a camera angle or
-    # position change with no new ejaculation involved (this replaced logic that counted
-    # 9 events on a video with exactly one real creampie, purely from repositioning).
-    # Instead: a newly-visible CUM sighting only counts as a NEW event if we've seen a
-    # fresh INSERTED frame since the last one we counted -- i.e. real evidence a new round
-    # actually happened, not just that the same load became visible again.
-    event_starts: List[str] = []
+    # position change with no new ejaculation involved.
+    #
+    # Requiring "a fresh INSERTED frame since the last counted event" (the previous version
+    # of this logic) isn't a strong enough bar: real scenes routinely keep thrusting for a
+    # while *after* the actual creampie, without a new load -- that's completely normal, not
+    # evidence of a second round, but it does produce genuine fresh INSERTED readings, which
+    # let the same existing cum becoming visible again later get miscounted as a new event
+    # (confirmed in testing: a video correctly filed as "Single Creampie" came back showing
+    # 12 separate events, all real INSERTED/CUM readings, just not new ejaculations).
+    #
+    # So a new event now requires real evidence of a scene break: a stretch of at least
+    # min_gap_seconds where the state was genuinely NONE (neither inserted nor cum visible)
+    # since the last counted event, not just some intervening INSERTED frame. Ordinary
+    # continued sex after a creampie rarely produces a sustained NONE reading (the camera
+    # stays on the action), so this should no longer fire on it; an actual cut to a new
+    # position/partner, or a title card between compilation clips, will. Pass
+    # min_gap_seconds=0 for compilation-style content, where rapid-fire distinct events are
+    # real and this scene-break requirement would wrongly suppress most of them.
+    event_starts_raw: List[float] = []
     was_cum = False
-    seen_insertion_since_last_event = False
+    clean_since_ts: Optional[float] = None
     for ts, state in frame_states:
         if state == "INSERTED":
-            seen_insertion_since_last_event = True
             was_cum = False
         elif state == "CUM":
-            if not was_cum and (seen_insertion_since_last_event or not event_starts):
-                event_starts.append(format_ts(ts))
-                seen_insertion_since_last_event = False
+            if not was_cum:
+                had_scene_break = (
+                    not event_starts_raw
+                    or min_gap_seconds <= 0
+                    or (clean_since_ts is not None and (ts - clean_since_ts) >= min_gap_seconds)
+                )
+                if had_scene_break:
+                    event_starts_raw.append(ts)
+                    clean_since_ts = None
             was_cum = True
         else:
+            if clean_since_ts is None:
+                clean_since_ts = ts
             was_cum = False
-    return len(event_starts), event_starts
+    return len(event_starts_raw), [format_ts(ts) for ts in event_starts_raw]
 
 # Video porn no longer gets a scene-by-scene narrative -- just a compact structured
 # summary. This cheap per-frame classifier drives that: nudity presence (to decide porn
@@ -875,27 +917,35 @@ _VIDEO_SIGNAL_PROMPT = (
     "other sentences or explanations.\n"
     "If this frame is just a text card, logo, watermark screen, or loading screen with no "
     "person shown, respond with exactly: TITLECARD\n"
-    "Otherwise respond with exactly these four labeled lines, in this order:\n"
+    "Otherwise respond with exactly these five labeled lines, in this order:\n"
     "NUDITY: Y or N -- Y if any bare breast, bare nipple, bare butt, or genitals are visible "
     "right now, even partially (e.g. a nipple peeking out of clothing). Otherwise N.\n"
-    "STATE: one of INSERTED, CUM, or NONE -- INSERTED if a cock/toy is actively penetrating "
-    "her pussy or ass right now. CUM if an actual visible load of cum/jizz (opaque, "
-    "whitish/cloudy) is on or dripping from her pussy or ass right now AND nothing is "
-    "currently penetrating her (her own natural arousal wetness doesn't count). NONE "
-    "otherwise.\n"
+    "STATE: one of INSERTED, CUM, or NONE. A creampie is ONLY a penis or toy ejaculating "
+    "inside her VAGINA -- cum in her mouth, on her face, or on/in her ass/anus does NOT "
+    "count, no matter how it looks. INSERTED if a cock/toy is actively penetrating her "
+    "vagina right now. CUM if an actual visible load of cum/jizz (opaque, whitish/cloudy) is "
+    "on or dripping from her vagina right now AND nothing is currently penetrating it (her "
+    "own natural arousal wetness doesn't count). NONE otherwise -- this includes oral sex, "
+    "a facial/cum on her face or in her mouth, cum on/in her ass, and anal penetration; none "
+    "of those are INSERTED or CUM, they're always NONE for this field.\n"
     "BOUND: Y or N -- Y if she is visibly tied up, chained, cuffed, or otherwise physically "
     "restrained right now. Otherwise N.\n"
     "SPECIES: NONE, or a single animal name (e.g. dog, horse) if a REAL (photographic, "
     "non-illustrated, non-anthropomorphic) animal is sexually engaging with her right now. "
     "Illustrated/anime/furry/anthro humanoid-animal characters do NOT count -- answer NONE "
     "for those, and NONE if only humans are involved.\n"
-    "Example full answer:\nNUDITY: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE"
+    "LACTATING: Y or N -- Y if milk is visibly leaking, dripping, or spraying from her bare "
+    "nipples/breasts right now. Otherwise N.\n"
+    "Example full answer:\nNUDITY: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE\nLACTATING: N"
 )
 
 def _parse_video_signal(text: str) -> dict:
     t = text.upper()
     if "TITLECARD" in t:
-        return {"titlecard": True, "nudity": False, "state": "NONE", "bound": False, "species": None}
+        return {
+            "titlecard": True, "nudity": False, "state": "NONE", "bound": False,
+            "species": None, "lactating": False,
+        }
     nudity = bool(re.search(r"NUDITY\s*:\s*Y", t))
     if re.search(r"STATE\s*:\s*INSERTED", t):
         state = "INSERTED"
@@ -904,11 +954,21 @@ def _parse_video_signal(text: str) -> dict:
     else:
         state = "NONE"
     bound = bool(re.search(r"BOUND\s*:\s*Y", t))
+    # Matched against a fixed vocabulary with a trailing word boundary rather than a bare
+    # [A-Z]+ capture -- the model doesn't always put a line break between fields, and a
+    # greedy capture would swallow the next label too (observed in testing: "SPECIES: NONE"
+    # run straight into "LACTATING: Y" on the same line got captured whole as the species
+    # "nonelactating"). A missed word boundary here just falls back to no species detected,
+    # which is a far safer failure mode than a garbage species value.
     species = None
-    m = re.search(r"SPECIES\s*:\s*([A-Z]+)", t)
-    if m and m.group(1) != "NONE":
+    m = re.search(r"SPECIES\s*:\s*(DOG|HORSE|WOLF|PIG|DONKEY|BULL|GOAT|SNAKE|CAT|FOX|BEAR|MONKEY)\b", t)
+    if m:
         species = m.group(1).lower()
-    return {"titlecard": False, "nudity": nudity, "state": state, "bound": bound, "species": species}
+    lactating = bool(re.search(r"LACTATING\s*:\s*Y", t))
+    return {
+        "titlecard": False, "nudity": nudity, "state": state, "bound": bound,
+        "species": species, "lactating": lactating,
+    }
 
 # Anthropomorphic/furry art -- deliberately keys off words our own prompt uses for
 # illustrated animal-humanoid characters, not real animals (which would never be
@@ -947,7 +1007,7 @@ def _classify_video_frames(
     batch_fn = getattr(caption_detailed, "batch", None)
     if batch_fn:
         items = [
-            {"pil_image": img, "prompt_override": _VIDEO_SIGNAL_PROMPT, "max_new_tokens": 48}
+            {"pil_image": img, "prompt_override": _VIDEO_SIGNAL_PROMPT, "max_new_tokens": 64}
             for _, img in frames
         ]
         raw = batch_fn(items)
@@ -993,11 +1053,40 @@ def build_compact_person_prompt() -> str:
 # when she's the only person identified for this asset.
 COMPACT_DESC_SKIP_NAMES = {"Lydia"}
 
+_VALID_BREAST_SIZES = {"small", "medium", "large", "huge"}
+_AGE_KEYWORDS = ("young", "middle", "old")
+
+def _parse_person_desc(text: str) -> Tuple[List[str], List[str], List[str]]:
+    breasts, races, ages = [], [], []
+    for woman in text.split("|"):
+        # The model doesn't always honor "no other commentary" -- occasionally tacks on a
+        # parenthetical aside onto the last field (e.g. "middle age (Note: the visible skin
+        # tone suggests...)"), or drops the triplet format entirely for one entry and writes
+        # a free-form physical description instead (observed: "tattoo on right shoulder" in
+        # the breast-size slot). Truncate at the first "(", and validate breast size/age
+        # against their known-small vocabularies rather than trusting position alone --
+        # race has no fixed vocabulary to check against, so it rides along with whichever
+        # entries pass the other two checks.
+        fields = [p.split("(")[0].strip() for p in woman.split(",")]
+        if len(fields) < 3 or not all(fields[:3]):
+            continue
+        breast, race, age = fields[0], fields[1], fields[2]
+        if breast.lower() not in _VALID_BREAST_SIZES:
+            continue
+        if not any(kw in age.lower() for kw in _AGE_KEYWORDS):
+            continue
+        breasts.append(breast)
+        races.append(race)
+        ages.append(age)
+    return breasts, races, ages
+
 def caption_video(
     asset_id: str,
     caption_detailed,
     person_names: Optional[List[str]] = None,
     dense: bool = False,
+    compilation: bool = False,
+    feral: bool = False,
 ) -> Tuple[str, str]:
     fd, video_path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
@@ -1033,9 +1122,17 @@ def caption_video(
             frames = extract_video_frames(video_path, dense=True)
             signals = _classify_video_frames(frames, caption_detailed)
 
-        count, event_times = count_creampie_events([(s["ts"], s["state"]) for s in signals])
+        if feral:
+            cum_ts = next((s["ts"] for s in signals if s["state"] == "CUM"), None)
+            count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
+        else:
+            min_gap = 0.0 if compilation else 60.0
+            count, event_times = count_creampie_events(
+                [(s["ts"], s["state"]) for s in signals], min_gap_seconds=min_gap
+            )
         bound_ever = any(s["bound"] for s in signals)
         species = next((s["species"] for s in signals if s["species"]), None)
+        lactating_ever = any(s["lactating"] for s in signals)
 
         # Representative frame for the compact person description -- prefer an actually-nude
         # frame over an arbitrary one, and skip title cards/intro screens.
@@ -1043,25 +1140,36 @@ def caption_video(
         candidates = nude_frames or frames
         _, desc_img = candidates[len(candidates) // 2]
 
-        parts = []
+        breasts, races, ages = [], [], []
         if not (person_names and set(person_names) <= COMPACT_DESC_SKIP_NAMES):
             person_desc = caption_detailed(
                 desc_img, prompt_override=build_compact_person_prompt(), max_new_tokens=80
             ).strip()
             if person_desc:
-                parts.append(person_desc)
+                breasts, races, ages = _parse_person_desc(person_desc)
 
+        # Labeled "Field | value" lines -- self-documenting on purpose, since a bare
+        # comma-separated blob is meaningless to re-read weeks later.
+        fields: List[Tuple[str, str]] = []
         if count >= 1:
-            plural = "creampie" if count == 1 else "creampies"
-            parts.append(f"SUMMARY: {count} separate {plural} visible (~{', '.join(event_times)})")
-
-        if species:
-            parts.append(f"INTERSPECIES: {species}")
-
+            fields.append(("Separate Creampies", f"{count} (~{', '.join(event_times)})"))
+        if breasts:
+            fields.append(("Breast Size", ", ".join(breasts)))
+        if races:
+            fields.append(("Race", ", ".join(races)))
+        if ages:
+            fields.append(("Approximate Age", ", ".join(ages)))
         if bound_ever:
-            parts.append("BOUND: restrained")
+            fields.append(("Restrained", "yes"))
+        if species:
+            fields.append(("Interspecies", species))
+        if lactating_ever:
+            fields.append(("Lactating", "yes"))
 
-        caption = " || ".join(parts) if parts else "Explicit content -- no further detail detected."
+        if fields:
+            caption = " | ".join(f"{label} | {value}" for label, value in fields)
+        else:
+            caption = "Explicit content -- no further detail detected."
         return caption, "VIDEO-PORN-COMPACT"
     finally:
         try:
@@ -1213,6 +1321,20 @@ def immich_unarchive(asset_id: str) -> None:
             print(f"[unarchive] {asset_id} failed {r.status_code}: {r.text}", flush=True)
     except Exception as e:
         print(f"[unarchive] {asset_id} failed: {e}", flush=True)
+
+def immich_archive(asset_id: str) -> None:
+    try:
+        url = f"{IMMICH_URL}/api/assets"
+        r = requests.put(
+            url,
+            headers={**immich_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"ids": [asset_id], "visibility": "archive"}),
+            timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"[archive] {asset_id} failed {r.status_code}: {r.text}", flush=True)
+    except Exception as e:
+        print(f"[archive] {asset_id} failed: {e}", flush=True)
 
 _album_list_cache: Optional[List[dict]] = None
 
@@ -1457,8 +1579,11 @@ def main():
 
             if asset_type == "VIDEO":
                 dense = is_dense_sampling_album(albums)
+                compilation = is_compilation_album(albums)
+                feral = is_feral_album(albums)
                 raw_caption, mode = caption_video(
-                    asset_id, caption_detailed, person_names=person_names, dense=dense
+                    asset_id, caption_detailed, person_names=person_names, dense=dense,
+                    compilation=compilation, feral=feral,
                 )
             else:
                 if prefetched_thumbnail_error is not None:
@@ -1474,7 +1599,16 @@ def main():
                 print(f"[skip] {asset_id} produced empty/junk caption (marked skip)", flush=True)
                 return
 
-            caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
+            if mode == "VIDEO-PORN-COMPACT":
+                # The compact field format has no "the woman"/"she" prose to substitute a
+                # name into, and it deliberately omits any person-reference wording when
+                # the only identified person is Lydia (that's the whole point of skipping
+                # her description) -- running this through the narrative-caption identity
+                # logic would misread that as "nobody depicted" and incorrectly flag her as
+                # misfiled.
+                implied_tags, misfiled_identities = [], []
+            else:
+                caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
             caption = " ".join(caption.split()).strip()[:MAX_CAPTION_CHARS]
 
             ok = immich_update_description(asset_id, caption)
@@ -1496,15 +1630,18 @@ def main():
                     print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
 
                 if asset_type == "VIDEO":
-                    count_match = re.search(r"SUMMARY:\s*(\d+)\s+separate\s+creampie", caption, re.IGNORECASE)
+                    count_match = re.search(r"Separate Creampies\s*\|\s*(\d+)", caption, re.IGNORECASE)
                     if count_match:
                         n = int(count_match.group(1))
                         target = SINGLE_CREAMPIE_ALBUM_ID if n == 1 else MULTIPLE_CREAMPIE_ALBUM_ID if n >= 2 else None
                         if target:
                             immich_add_to_album(asset_id, target)
+                            if target == SINGLE_CREAMPIE_ALBUM_ID:
+                                immich_archive(asset_id)
 
                 if _FURRY_TRIGGER_RE.search(caption):
                     immich_add_to_album(asset_id, FURRY_ALBUM_ID)
+                    immich_archive(asset_id)
 
                 if _LACTATION_TRIGGER_RE.search(caption):
                     immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
