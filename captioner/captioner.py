@@ -114,6 +114,13 @@ FURRY_ALBUM_ID = os.environ.get("FURRY_ALBUM_ID", "b135f926-dd5b-4230-aa05-32bbd
 LACTATION_ALBUM_ID = os.environ.get("LACTATION_ALBUM_ID", "2921493a-b6ba-4dcd-947c-d2fd3bd12f68")
 HUCOW_ALBUM_ID = os.environ.get("HUCOW_ALBUM_ID", "d526cf69-8aed-4fdc-b93e-6dacafe7bec4")
 
+# If 1, porn assets get their "Date Taken" stamped with the moment they were captioned, so
+# freshly-processed material sorts to the top of the timeline for review. Deliberately gated
+# on the caption *mode* (VIDEO-PORN-COMPACT -- i.e. nudity was actually detected) rather than
+# on album membership, so it can never touch a family video that merely happens to sit in a
+# broadly-named album.
+STAMP_PORN_CAPTION_DATE = os.environ.get("STAMP_PORN_CAPTION_DATE", "1") == "1"
+
 # Tagging: best-effort (won't crash if API changes)
 ENABLE_TAGS = os.environ.get("ENABLE_TAGS", "0") == "1"  # default OFF until you want it
 
@@ -753,6 +760,34 @@ def immich_update_description(asset_id: str, caption: str) -> bool:
         print(f"[immich] PUT /api/assets failed {r.status_code}: {r.text}", flush=True)
         return False
     return True
+
+def immich_set_date_taken_now(asset_id: str) -> None:
+    """Stamp an asset's "Date Taken" (EXIF dateTimeOriginal) with the current time, so
+    freshly-captioned porn sorts to the top of the timeline for review.
+
+    Only dateTimeOriginal moves -- fileCreatedAt/localDateTime are NOT recomputed from it on
+    this Immich version (v3.1.0, verified empirically), so takenAfter/takenBefore API search
+    won't match on the new value even though the UI's date sort does reflect it.
+
+    Safe against reprocessing loops: candidate selection keys off an empty description, and
+    the DB-direct queue orders by the DB's own createdAt column, neither of which this
+    touches.
+    """
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    if DRY_RUN:
+        print(f"[dryrun] Would set dateTaken {asset_id} => {now}", flush=True)
+        return
+    try:
+        r = requests.put(
+            f"{IMMICH_URL}/api/assets",
+            headers={**immich_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"ids": [asset_id], "dateTimeOriginal": now}),
+            timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"[datestamp] {asset_id} failed {r.status_code}: {r.text}", flush=True)
+    except Exception as e:
+        print(f"[datestamp] {asset_id} failed: {e}", flush=True)
 
 # ----------------------------
 # Video handling (download original, sample frames via ffmpeg, caption each)
@@ -1761,6 +1796,9 @@ def main():
 
                 if _HUCOW_TRIGGER_RE.search(caption):
                     immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
+
+                if STAMP_PORN_CAPTION_DATE and mode == "VIDEO-PORN-COMPACT":
+                    immich_set_date_taken_now(asset_id)
             else:
                 print(f"[fail] {asset_id} update failed", flush=True)
 
