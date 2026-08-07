@@ -20,6 +20,8 @@ from captioner import (  # noqa: E402
     get_asset_albums,
     extract_identities_from_albums,
     is_dense_sampling_album,
+    is_compilation_album,
+    is_feral_album,
 )
 import requests
 
@@ -28,6 +30,7 @@ ALBUMS = {
     "Single Creampie": "3a22144e-143c-4f43-a508-8b3f7fadbcb5",
     "Feral on Human Video": "46675d67-bcc5-4375-b998-27a976204dcb",
     "Multiple Creampie": "e7479905-44b5-42ca-86d0-aaf8fb7c36e3",
+    "Creampie Compilation": "090261d8-dd49-48a0-8c48-9be74f67ee90",
 }
 
 N_PER_ALBUM = 5
@@ -61,9 +64,14 @@ def main():
             albums = get_asset_albums(asset_id)
             person_names = extract_identities_from_albums(albums)
             dense = is_dense_sampling_album(albums)
-            print(f"\n--- {asset_id} (dense={dense}, person_names={person_names}) ---", flush=True)
+            compilation = is_compilation_album(albums)
+            feral = is_feral_album(albums)
+            print(f"\n--- {asset_id} (dense={dense}, compilation={compilation}, feral={feral}, person_names={person_names}) ---", flush=True)
             try:
-                caption, mode = caption_video(asset_id, caption_detailed, person_names=person_names, dense=dense)
+                caption, mode = caption_video(
+                    asset_id, caption_detailed, person_names=person_names, dense=dense,
+                    compilation=compilation, feral=feral,
+                )
                 print(f"[{mode}] {caption}", flush=True)
             except Exception as e:
                 print(f"[error] {asset_id}: {e}", flush=True)
