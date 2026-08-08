@@ -119,12 +119,15 @@ HUCOW_ALBUM_ID = os.environ.get("HUCOW_ALBUM_ID", "d526cf69-8aed-4fdc-b93e-6daca
 # nudity found outside them is parked at "Please categorize" for manual sorting instead of
 # being guessed at.
 MULTI_CREAMPIE_PREFIX = os.environ.get("MULTI_CREAMPIE_PREFIX", "200.000.")
-# Every porn-section prefix: 100 (people I know IRL / Lydia), 200 (creampie & friends),
-# 300 (furry/feral), 400 (camspy / game porn), 500 (hotwife / hookers). Membership in any of
-# them means the human has already filed it, so it gets captioned rather than parked.
+# Which albums count as "the human already filed this", so it gets captioned instead of
+# parked at "Please categorize". Empty (the default) means ANY album membership qualifies,
+# which is the intent: freshly-imported porn lands in no album and needs sorting, while
+# anything already sorted -- Lydia Captions (001.x), Me (002.x), the 100-500 porn sections,
+# whatever numbering gets added later -- is captioned where it sits. Set to a comma-separated
+# prefix list to restrict it.
 CATEGORIZED_ALBUM_PREFIXES = tuple(
     p.strip()
-    for p in os.environ.get("CATEGORIZED_ALBUM_PREFIXES", "100.,200.,300.,400.,500.").split(",")
+    for p in os.environ.get("CATEGORIZED_ALBUM_PREFIXES", "").split(",")
     if p.strip()
 )
 FULL_CAPTION_ALBUM_KEYWORDS = [
@@ -946,10 +949,12 @@ def is_masturbation_album(albums: List[str]) -> bool:
 # most creampie videos open with her fingering herself, so auto-routing between e.g.
 # Masturbation and Single Creampie isn't reliable enough to do unattended.
 def is_categorized_album(albums: List[str]) -> bool:
-    return any(
-        (album or "").strip().startswith(CATEGORIZED_ALBUM_PREFIXES)
-        for album in (albums or [])
-    )
+    named = [a for a in (albums or []) if (a or "").strip()]
+    if not named:
+        return False
+    if not CATEGORIZED_ALBUM_PREFIXES:
+        return True
+    return any(a.strip().startswith(CATEGORIZED_ALBUM_PREFIXES) for a in named)
 
 # Furry/anthro content shouldn't get a creampie count at all -- the whole detection was
 # built and tuned around live-action photography (vagina location, cum vs. lube texture),
