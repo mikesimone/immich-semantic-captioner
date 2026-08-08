@@ -908,6 +908,19 @@ def is_multiple_creampie_album(albums: List[str]) -> bool:
 def is_furry_album(albums: List[str]) -> bool:
     return any("furry stuff" in (album or "").lower() for album in (albums or []))
 
+# Anthro Video is curated, 100% non-human illustrated content -- a much more trustworthy
+# "this isn't a human" signal than Furry Stuff membership, which is contaminated with human
+# videos the captioner auto-filed there off incidental caption words ("furry handcuffs" and
+# friends). Verified: 97 of 106 Furry-Stuff-tagged videos sitting in Single Creampie were
+# actually imported into the human Single Creampie folder.
+def is_anthro_album(albums: List[str]) -> bool:
+    return any("anthro video" in (album or "").lower() for album in (albums or []))
+
+# Content that is definitionally not a human woman being creampied, so creampie detection
+# and all human-category auto-filing are skipped for it.
+def is_nonhuman_album(albums: List[str]) -> bool:
+    return is_anthro_album(albums) or is_feral_album(albums) or is_furry_album(albums)
+
 def extract_video_frames(video_path: str, dense: bool = False) -> List[Tuple[float, Image.Image]]:
     duration = probe_duration_seconds(video_path)
     timestamps = compute_dense_timestamps(duration) if dense else compute_video_timestamps(duration)
@@ -1188,7 +1201,7 @@ def caption_video(
     compilation: bool = False,
     feral: bool = False,
     multiple: bool = False,
-    furry: bool = False,
+    nonhuman: bool = False,
 ) -> Tuple[str, str]:
     fd, video_path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
@@ -1224,9 +1237,14 @@ def caption_video(
             frames = extract_video_frames(video_path, dense=True)
             signals = _classify_video_frames(frames, caption_detailed)
 
-        if furry or compilation:
-            # No creampie count at all for furry/anthro content -- the detection was built
-            # around live-action photography and doesn't reliably apply to illustrated art.
+        if nonhuman or compilation or feral:
+            # No creampie count at all for non-human content (anthro/furry/feral) -- the
+            # detection was built around live-action photography and doesn't reliably apply
+            # to illustrated art.
+            #
+            # Feral is included for a different reason: feral-on-human always ends in
+            # ejaculation inside the woman, so the count carries no information -- it would
+            # be 1 for every single one of them. Reporting it is just noise.
             #
             # Compilation content is a different thing entirely from Multiple Creampie, not
             # a looser version of it: a compilation cuts between DIFFERENT women each getting
@@ -1235,9 +1253,9 @@ def caption_video(
             # creampie" video either (confirmed: a compilation got auto-filed into Single
             # Creampie, and a compilation manually placed in Multiple Creampie got a bogus
             # per-woman event count). So compilation membership skips creampie detection
-            # unconditionally, the same as furry, regardless of Multiple Creampie placement.
+            # unconditionally, regardless of Multiple Creampie placement.
             count, event_times = 0, []
-        elif feral or not multiple:
+        elif not multiple:
             # Assume at most one creampie for anything not already manually placed in the
             # Multiple Creampie album (feral overrides even that placement) -- just detect
             # whether one happened at all, don't try to count how many. An isolated CUM
@@ -1721,18 +1739,19 @@ def main():
 
             person_names = extract_identities_from_albums(albums)
 
-            # Computed for every asset type, not just video -- the furry auto-filing below
-            # applies to images too, and feral content must be excluded from it there as well.
+            # Computed for every asset type, not just video -- the auto-filing rules below
+            # apply to images too, and non-human content must be excluded from them there
+            # as well.
             feral = is_feral_album(albums)
+            nonhuman = is_nonhuman_album(albums)
 
             if asset_type == "VIDEO":
                 dense = is_dense_sampling_album(albums)
                 compilation = is_compilation_album(albums)
                 multiple = is_multiple_creampie_album(albums)
-                furry = is_furry_album(albums)
                 raw_caption, mode = caption_video(
                     asset_id, caption_detailed, person_names=person_names, dense=dense,
-                    compilation=compilation, feral=feral, multiple=multiple, furry=furry,
+                    compilation=compilation, feral=feral, multiple=multiple, nonhuman=nonhuman,
                 )
             else:
                 if prefetched_thumbnail_error is not None:
@@ -1784,29 +1803,30 @@ def main():
                     # and never moves an asset out of it, only files newly-detected creampies
                     # into Single Creampie for anything not already placed there by hand.
                     #
-                    # Feral content is excluded: it's assumed single for *counting* purposes
-                    # (see caption_video), but it's its own category with its own albums and
-                    # doesn't belong in the human Single Creampie album -- without this guard
-                    # the assumed count of 1 auto-filed every feral video straight into it.
+                    # Single Creampie is a 100%-human album, so non-human content never gets
+                    # filed into it (caption_video already emits no count for those, but the
+                    # guard is explicit so the two can't drift apart).
                     count_match = re.search(r"Separate Creampies\s*\|\s*(\d+)", caption, re.IGNORECASE)
-                    if count_match and not multiple and not feral:
+                    if count_match and not multiple and not nonhuman:
                         n = int(count_match.group(1))
                         if n >= 1:
                             immich_add_to_album(asset_id, SINGLE_CREAMPIE_ALBUM_ID)
                             immich_archive(asset_id)
 
-                # Feral means a real, non-anthropomorphic animal -- the opposite of furry,
-                # which is specifically animal-humanoid characters -- so feral content never
-                # belongs in Furry Stuff no matter what the caption text happens to say.
-                if _FURRY_TRIGGER_RE.search(caption) and not feral:
-                    immich_add_to_album(asset_id, FURRY_ALBUM_ID)
-                    immich_archive(asset_id)
+                # Feral is the one category that belongs in no additional album at all: it's
+                # a real, non-anthropomorphic animal, which is the opposite of furry, and its
+                # own feral albums are the whole classification. Everything below is skipped
+                # for it -- anthro content, by contrast, is expected to live in Furry Stuff.
+                if not feral:
+                    if _FURRY_TRIGGER_RE.search(caption):
+                        immich_add_to_album(asset_id, FURRY_ALBUM_ID)
+                        immich_archive(asset_id)
 
-                if _LACTATION_TRIGGER_RE.search(caption):
-                    immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
+                    if _LACTATION_TRIGGER_RE.search(caption):
+                        immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
 
-                if _HUCOW_TRIGGER_RE.search(caption):
-                    immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
+                    if _HUCOW_TRIGGER_RE.search(caption):
+                        immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
 
                 if STAMP_PORN_CAPTION_DATE and mode == "VIDEO-PORN-COMPACT":
                     immich_set_date_taken_now(asset_id)
