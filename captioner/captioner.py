@@ -114,6 +114,30 @@ FURRY_ALBUM_ID = os.environ.get("FURRY_ALBUM_ID", "b135f926-dd5b-4230-aa05-32bbd
 LACTATION_ALBUM_ID = os.environ.get("LACTATION_ALBUM_ID", "2921493a-b6ba-4dcd-947c-d2fd3bd12f68")
 HUCOW_ALBUM_ID = os.environ.get("HUCOW_ALBUM_ID", "d526cf69-8aed-4fdc-b93e-6dacafe7bec4")
 
+# Album-routing configuration. Everything in the 200.000.xxx range is multiple-creampie
+# content; CATEGORIZED_ALBUM_PREFIXES are the ranges the captioner knows how to handle, so
+# nudity found outside them is parked at "Please categorize" for manual sorting instead of
+# being guessed at.
+MULTI_CREAMPIE_PREFIX = os.environ.get("MULTI_CREAMPIE_PREFIX", "200.000.")
+# Every porn-section prefix: 100 (people I know IRL / Lydia), 200 (creampie & friends),
+# 300 (furry/feral), 400 (camspy / game porn), 500 (hotwife / hookers). Membership in any of
+# them means the human has already filed it, so it gets captioned rather than parked.
+CATEGORIZED_ALBUM_PREFIXES = tuple(
+    p.strip()
+    for p in os.environ.get("CATEGORIZED_ALBUM_PREFIXES", "100.,200.,300.,400.,500.").split(",")
+    if p.strip()
+)
+FULL_CAPTION_ALBUM_KEYWORDS = [
+    k.strip().lower()
+    for k in os.environ.get("FULL_CAPTION_ALBUMS", "camspy,lv hookers").split(",")
+    if k.strip()
+]
+UNCATEGORIZED_CAPTION = os.environ.get("UNCATEGORIZED_CAPTION", "Please categorize")
+
+# Assets shot on these EXIF make/model get auto-filed into Camspy.
+CAMSPY_ALBUM_ID = os.environ.get("CAMSPY_ALBUM_ID", "64643582-0623-4bc2-931f-30149cbd6e45")
+CAMSPY_EXIF_MAKE = os.environ.get("CAMSPY_EXIF_MAKE", "Meta").strip().lower()
+
 # If 1, porn assets get their "Date Taken" stamped with the moment they were captioned, so
 # freshly-processed material sorts to the top of the timeline for review. Deliberately gated
 # on the caption *mode* (VIDEO-PORN-COMPACT -- i.e. nudity was actually detected) rather than
@@ -899,7 +923,33 @@ def is_feral_album(albums: List[str]) -> bool:
 # uploads are handled by the human moving them into that album and clearing the description
 # before the captioner ever sees them, not by the captioner guessing.
 def is_multiple_creampie_album(albums: List[str]) -> bool:
-    return any("multiple creampie" in (album or "").lower() for album in (albums or []))
+    # The whole 200.000.xxx range is multiple-creampie content: the base album plus its
+    # studio/kink sub-albums (Puta Locura, Creampie Squad, Gangbang, Slutwife, Czech,
+    # Orgy, Hentaied...). Being filed into any of them is the human saying "this is a
+    # multi", so event counting runs for all of them.
+    return any((album or "").strip().startswith(MULTI_CREAMPIE_PREFIX) for album in (albums or []))
+
+# Albums that are ordinary life footage filed under a porn-ish heading -- Ray-Ban Meta
+# glasses capture, mostly. Nudity may appear, but these want the full narrative caption
+# rather than the compact porn field format.
+def is_full_caption_album(albums: List[str]) -> bool:
+    return any(
+        any(kw in (album or "").lower() for kw in FULL_CAPTION_ALBUM_KEYWORDS)
+        for album in (albums or [])
+    )
+
+def is_masturbation_album(albums: List[str]) -> bool:
+    return any("masturbation" in (album or "").lower() for album in (albums or []))
+
+# Has the human already filed this somewhere the captioner knows how to caption? Porn that
+# hasn't been sorted yet gets parked at "Please categorize" instead of being guessed at --
+# most creampie videos open with her fingering herself, so auto-routing between e.g.
+# Masturbation and Single Creampie isn't reliable enough to do unattended.
+def is_categorized_album(albums: List[str]) -> bool:
+    return any(
+        (album or "").strip().startswith(CATEGORIZED_ALBUM_PREFIXES)
+        for album in (albums or [])
+    )
 
 # Furry/anthro content shouldn't get a creampie count at all -- the whole detection was
 # built and tuned around live-action photography (vagina location, cum vs. lube texture),
@@ -1138,6 +1188,24 @@ def _classify_video_frames(
         signals.append(parsed)
     return signals
 
+# What she's masturbating with -- only asked for content filed in the Masturbation album,
+# since auto-detecting "this is a masturbation video" doesn't work (most creampie videos
+# open with her fingering herself, so the signal is present in half the library).
+_MASTURBATION_PROMPT = (
+    "Look at this image. Is she masturbating, and if so what with? Answer with ONLY a short "
+    "phrase, nothing else:\n"
+    "- one of: hand, fingers, dildo, vibrator, buttplug\n"
+    "- or, if it's some other object, a two-or-three word description of it (e.g. "
+    "\"hairbrush handle\", \"shower head\")\n"
+    "If she is not masturbating in this frame, answer exactly: NONE"
+)
+
+def _parse_masturbation_answer(text: str) -> Optional[str]:
+    t = " ".join((text or "").split()).strip().strip(".")
+    if not t or t.upper().startswith("NONE") or len(t) > 40:
+        return None
+    return t.lower()
+
 # Compact structured description for video porn -- no scene narrative, just the handful
 # of searchable facts that matter: breast size, race, and age of whichever woman/women are
 # visible. Skipping Lydia entirely is handled by the caller (based on album identity), not
@@ -1202,6 +1270,9 @@ def caption_video(
     feral: bool = False,
     multiple: bool = False,
     nonhuman: bool = False,
+    full_caption: bool = False,
+    masturbation: bool = False,
+    categorized: bool = True,
 ) -> Tuple[str, str]:
     fd, video_path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
@@ -1219,14 +1290,22 @@ def caption_video(
             (s["nudity"] or s["state"] != "NONE") for s in signals if not s["titlecard"]
         )
 
-        if not any_nudity:
-            # Not sexual content (e.g. a family video) -- keep the old scene-by-scene
-            # narrative treatment, unchanged.
+        # Full narrative captioning for: anything non-sexual (family video etc.), and for
+        # the "real life that happens to be filed under porn" albums (Camspy / LV Hookers --
+        # Ray-Ban Meta capture), which want the whole description even when nudity shows up.
+        if not any_nudity or full_caption:
             parts = []
             for ts, img in frames:
                 cap = caption_detailed(img, video_note="This is one frame from a video.", person_names=person_names)
                 parts.append(f"[{format_ts(ts)}] {cap}")
             return " || ".join(parts), "VIDEO-FRAMES"
+
+        # Porn that hasn't been filed anywhere the captioner understands: park it rather than
+        # guess. Auto-routing between e.g. Masturbation and Single Creampie isn't reliable
+        # (most creampie videos open with her fingering herself), so the human sorts it into
+        # an album and clears the description, which puts it back in the queue.
+        if not categorized:
+            return UNCATEGORIZED_CAPTION, "VIDEO-UNCATEGORIZED"
 
         # Porn: make sure creampie counting, bondage, and interspecies detection cover the
         # whole runtime, not just this sampling pass -- re-scan with full dense/uniform
@@ -1310,6 +1389,20 @@ def caption_video(
             if person_desc:
                 breasts, races, ages = _parse_person_desc(person_desc)
 
+        # Only asked for Masturbation-album content -- see _MASTURBATION_PROMPT. Prefer a
+        # frame with no partner in it, since that's where she'd actually be using something
+        # on herself rather than being fucked.
+        implement = None
+        if masturbation:
+            solo = [(s["ts"], s["img"]) for s in signals
+                    if not s["titlecard"] and s["nudity"] and not s["partner_visible"]]
+            solo_candidates = solo or nude_frames or frames
+            _, solo_img = solo_candidates[len(solo_candidates) // 2]
+            implement = _parse_masturbation_answer(
+                caption_detailed(solo_img, prompt_override=_MASTURBATION_PROMPT,
+                                 max_new_tokens=24, greedy=True)
+            )
+
         # Labeled "Field | value" lines -- self-documenting on purpose, since a bare
         # comma-separated blob is meaningless to re-read weeks later.
         fields: List[Tuple[str, str]] = []
@@ -1327,6 +1420,8 @@ def caption_video(
             fields.append(("Interspecies", species))
         if lactating_ever:
             fields.append(("Lactating", "yes"))
+        if implement:
+            fields.append(("Masturbating With", implement))
 
         if fields:
             caption = " | ".join(f"{label} | {value}" for label, value in fields)
@@ -1677,6 +1772,7 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
       a.id as id,
       {select_type}
       ae.description as description,
+      ae.make as exif_make,
       COALESCE(array_remove(array_agg(al."albumName"), NULL), '{{}}'::text[]) as albums
     FROM asset a
     JOIN asset_exif ae ON ae."assetId" = a.id
@@ -1686,7 +1782,7 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
     WHERE
       cs.asset_id IS NULL
       AND (ae.description IS NULL OR btrim(ae.description) = '')
-    GROUP BY a.id, ae.description {', a."type"' if has_type else ''}
+    GROUP BY a.id, ae.description, ae.make {', a."type"' if has_type else ''}
     {order_clause}
     LIMIT %s;
     """
@@ -1728,6 +1824,7 @@ def main():
         albums: List[str],
         prefetched_thumbnail: Optional[Image.Image] = None,
         prefetched_thumbnail_error: Optional[Exception] = None,
+        exif_make: Optional[str] = None,
     ) -> None:
         nonlocal total_done
         try:
@@ -1752,6 +1849,9 @@ def main():
                 raw_caption, mode = caption_video(
                     asset_id, caption_detailed, person_names=person_names, dense=dense,
                     compilation=compilation, feral=feral, multiple=multiple, nonhuman=nonhuman,
+                    full_caption=is_full_caption_album(albums),
+                    masturbation=is_masturbation_album(albums),
+                    categorized=is_categorized_album(albums),
                 )
             else:
                 if prefetched_thumbnail_error is not None:
@@ -1797,36 +1897,47 @@ def main():
                     immich_unarchive(asset_id)
                     print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
 
-                if asset_type == "VIDEO":
-                    # Multiple Creampie membership is purely manual now (see
-                    # is_multiple_creampie_album) -- the captioner never adds an asset to it
-                    # and never moves an asset out of it, only files newly-detected creampies
-                    # into Single Creampie for anything not already placed there by hand.
-                    #
-                    # Single Creampie is a 100%-human album, so non-human content never gets
-                    # filed into it (caption_video already emits no count for those, but the
-                    # guard is explicit so the two can't drift apart).
-                    count_match = re.search(r"Separate Creampies\s*\|\s*(\d+)", caption, re.IGNORECASE)
-                    if count_match and not multiple and not nonhuman:
-                        n = int(count_match.group(1))
-                        if n >= 1:
-                            immich_add_to_album(asset_id, SINGLE_CREAMPIE_ALBUM_ID)
+                # "Please categorize" assets are deliberately left exactly as they are --
+                # unfiled, unarchived, and sitting in the main timeline waiting for the human.
+                # Auto-filing or archiving them here would defeat the entire point.
+                if mode == "VIDEO-UNCATEGORIZED":
+                    print(f"[parked] {asset_id} awaiting manual categorization", flush=True)
+                else:
+                    if asset_type == "VIDEO":
+                        # Multiple Creampie membership is purely manual (see
+                        # is_multiple_creampie_album) -- the captioner never adds an asset to
+                        # it and never removes one, only files newly-detected creampies into
+                        # Single Creampie for anything not already placed by hand.
+                        #
+                        # Single Creampie is a 100%-human album, so non-human content never
+                        # gets filed into it (caption_video already emits no count for those,
+                        # but the guard is explicit so the two can't drift apart).
+                        count_match = re.search(r"Separate Creampies\s*\|\s*(\d+)", caption, re.IGNORECASE)
+                        if count_match and not multiple and not nonhuman:
+                            n = int(count_match.group(1))
+                            if n >= 1:
+                                immich_add_to_album(asset_id, SINGLE_CREAMPIE_ALBUM_ID)
+                                immich_archive(asset_id)
+
+                    # Feral is the one category that belongs in no additional album at all:
+                    # it's a real, non-anthropomorphic animal, the opposite of furry, and its
+                    # own feral albums are the whole classification. Everything below is
+                    # skipped for it -- anthro, by contrast, is expected to live in Furry Stuff.
+                    if not feral:
+                        if _FURRY_TRIGGER_RE.search(caption):
+                            immich_add_to_album(asset_id, FURRY_ALBUM_ID)
                             immich_archive(asset_id)
 
-                # Feral is the one category that belongs in no additional album at all: it's
-                # a real, non-anthropomorphic animal, which is the opposite of furry, and its
-                # own feral albums are the whole classification. Everything below is skipped
-                # for it -- anthro content, by contrast, is expected to live in Furry Stuff.
-                if not feral:
-                    if _FURRY_TRIGGER_RE.search(caption):
-                        immich_add_to_album(asset_id, FURRY_ALBUM_ID)
-                        immich_archive(asset_id)
+                        if _LACTATION_TRIGGER_RE.search(caption):
+                            immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
 
-                    if _LACTATION_TRIGGER_RE.search(caption):
-                        immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
+                        if _HUCOW_TRIGGER_RE.search(caption):
+                            immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
 
-                    if _HUCOW_TRIGGER_RE.search(caption):
-                        immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
+                    # Ray-Ban Meta glasses capture belongs in Camspy regardless of what else
+                    # it is -- keyed off EXIF make, which the DB/API candidate fetch supplies.
+                    if (exif_make or "").strip().lower() == CAMSPY_EXIF_MAKE:
+                        immich_add_to_album(asset_id, CAMSPY_ALBUM_ID)
 
                 if STAMP_PORN_CAPTION_DATE and mode == "VIDEO-PORN-COMPACT":
                     immich_set_date_taken_now(asset_id)
@@ -1865,7 +1976,10 @@ def main():
                 asset_id = row.get("id")
                 asset_type = row.get("type", "UNKNOWN").upper()  # API may not have type; fallback
                 albums = get_asset_albums(asset_id)  # Fetch separately
-                process_candidate(asset_id, asset_type, albums)
+                process_candidate(
+                    asset_id, asset_type, albums,
+                    exif_make=(row.get("exifInfo") or {}).get("make"),
+                )
 
             print(f"[progress] total updated this run: {total_done}", flush=True)
 
@@ -1917,7 +2031,8 @@ def main():
                         except Exception as e:
                             thumb_err = e
 
-                    prefetch_q.put(("row", (asset_id, asset_type, albums, thumb, thumb_err)))
+                    prefetch_q.put(("row", (asset_id, asset_type, albums, thumb, thumb_err,
+                                            row.get("exif_make"))))
         finally:
             worker_conn.close()
 
@@ -1936,9 +2051,10 @@ def main():
             print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
             continue
 
-        asset_id, asset_type, albums, thumb, thumb_err = payload
+        asset_id, asset_type, albums, thumb, thumb_err, exif_make = payload
         try:
-            process_candidate(asset_id, asset_type, albums, prefetched_thumbnail=thumb, prefetched_thumbnail_error=thumb_err)
+            process_candidate(asset_id, asset_type, albums, prefetched_thumbnail=thumb,
+                              prefetched_thumbnail_error=thumb_err, exif_make=exif_make)
         finally:
             with in_flight_lock:
                 in_flight_ids.discard(asset_id)
