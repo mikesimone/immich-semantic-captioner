@@ -1721,10 +1721,13 @@ def main():
 
             person_names = extract_identities_from_albums(albums)
 
+            # Computed for every asset type, not just video -- the furry auto-filing below
+            # applies to images too, and feral content must be excluded from it there as well.
+            feral = is_feral_album(albums)
+
             if asset_type == "VIDEO":
                 dense = is_dense_sampling_album(albums)
                 compilation = is_compilation_album(albums)
-                feral = is_feral_album(albums)
                 multiple = is_multiple_creampie_album(albums)
                 furry = is_furry_album(albums)
                 raw_caption, mode = caption_video(
@@ -1780,14 +1783,22 @@ def main():
                     # is_multiple_creampie_album) -- the captioner never adds an asset to it
                     # and never moves an asset out of it, only files newly-detected creampies
                     # into Single Creampie for anything not already placed there by hand.
+                    #
+                    # Feral content is excluded: it's assumed single for *counting* purposes
+                    # (see caption_video), but it's its own category with its own albums and
+                    # doesn't belong in the human Single Creampie album -- without this guard
+                    # the assumed count of 1 auto-filed every feral video straight into it.
                     count_match = re.search(r"Separate Creampies\s*\|\s*(\d+)", caption, re.IGNORECASE)
-                    if count_match and not multiple:
+                    if count_match and not multiple and not feral:
                         n = int(count_match.group(1))
                         if n >= 1:
                             immich_add_to_album(asset_id, SINGLE_CREAMPIE_ALBUM_ID)
                             immich_archive(asset_id)
 
-                if _FURRY_TRIGGER_RE.search(caption):
+                # Feral means a real, non-anthropomorphic animal -- the opposite of furry,
+                # which is specifically animal-humanoid characters -- so feral content never
+                # belongs in Furry Stuff no matter what the caption text happens to say.
+                if _FURRY_TRIGGER_RE.search(caption) and not feral:
                     immich_add_to_album(asset_id, FURRY_ALBUM_ID)
                     immich_archive(asset_id)
 
