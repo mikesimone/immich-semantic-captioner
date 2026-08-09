@@ -1069,25 +1069,25 @@ _VIDEO_SIGNAL_PROMPT = (
     "right now (even partially). N if her vagina is not in view at all -- e.g. this frame "
     "only shows her face, breasts, hands, or any other body part with her crotch out of "
     "frame or fully covered by clothing.\n"
-    "STATE: one of INSERTED, CUM, or NONE. If GENITALS is N, STATE must always be NONE --  "
-    "you cannot see a creampie in a frame that doesn't show her vagina at all, no matter what "
-    "else is visible. A creampie is ONLY a penis or toy ejaculating inside her VAGINA -- cum "
-    "in her mouth, on her face, or on/in her ass/anus does NOT count, no matter how it looks. "
-    "Milk leaking/dripping/spraying from her nipples is NEVER cum, even though both are thin "
-    "white liquid -- milk on her breasts/chest is never STATE, it's the separate LACTATING "
-    "field below. INSERTED if a cock/toy is actively penetrating her vagina right now. CUM if "
-    "an actual visible load of cum/jizz is on or dripping from her vagina right now AND "
-    "nothing is currently penetrating it. Do NOT confuse lubricant with cum -- this is a "
-    "common mistake. Real cum is thick and white, is actively dripping or pooling out of her, "
-    "and does NOT cling to the penis/toy shaft. Lube is ALSO often thick and white, but it "
-    "stays smeared/coating the penis or toy shaft itself (visible on the shaft when it's "
-    "pulled out or during thrusting), and is typically present continuously throughout the "
-    "scene rather than only appearing after a period of sex. If the white fluid you see is "
-    "coating the shaft, or has been visible the whole time rather than only showing up after "
-    "real thrusting, that's lube -- answer NONE, not CUM. Her own natural arousal wetness "
-    "(thin, clear, glossy) also doesn't count as CUM. NONE otherwise -- this also includes "
-    "oral sex, a facial/cum on her face or in her mouth, cum on/in her ass, and anal "
-    "penetration; none of those are INSERTED or CUM, they're always NONE for this field.\n"
+    "INSERTED: Y or N -- Y if a cock or toy is actively penetrating her VAGINA right now. "
+    "Anal penetration is N. Oral is N.\n"
+    "CUMLOC: where a visible load of cum/jizz actually IS in this frame. Answer with exactly "
+    "one of these words -- do not explain, do not judge whether it 'counts':\n"
+    "  VAGINA -- cum is in, on, or dripping out of her vagina\n"
+    "  FACE -- cum is on her face, lips, tongue, in her mouth, or in her hair\n"
+    "  TITS -- cum is on her breasts, nipples, or chest\n"
+    "  ASS -- cum is in, on, or dripping out of her ass/anus, or on her butt cheeks\n"
+    "  BODY -- cum is somewhere else on her (stomach, back, thighs, hands, feet)\n"
+    "  NONE -- there is no visible load of cum anywhere in this frame\n"
+    "Report where the cum you can SEE is located. If cum is visible in more than one place, "
+    "answer with whichever single location has the most cum. Three things that are NOT cum "
+    "and must be answered NONE: (1) lubricant -- often thick and white like cum, but it stays "
+    "smeared and coating the penis or toy shaft itself and tends to be present throughout the "
+    "whole scene rather than appearing only after sustained thrusting; if the white fluid is "
+    "clinging to the shaft, it's lube; (2) her own natural arousal wetness, which is thin, "
+    "clear and glossy rather than opaque and white; (3) milk leaking or spraying from her "
+    "nipples, which belongs to the LACTATING field below, never here. If GENITALS is N you "
+    "cannot answer VAGINA, because her vagina isn't even in view.\n"
     "BOUND: Y or N -- Y if she is visibly tied up, chained, cuffed, or otherwise physically "
     "restrained right now. Otherwise N.\n"
     "SPECIES: NONE, or a single animal name (e.g. dog, horse) if a REAL (photographic, "
@@ -1096,7 +1096,8 @@ _VIDEO_SIGNAL_PROMPT = (
     "for those, and NONE if only humans are involved.\n"
     "LACTATING: Y or N -- Y if milk is visibly leaking, dripping, or spraying from her bare "
     "nipples/breasts right now. Otherwise N.\n"
-    "Example full answer:\nNUDITY: Y\nPARTNER: Y\nGENITALS: Y\nSTATE: CUM\nBOUND: N\nSPECIES: NONE\nLACTATING: N"
+    "Example full answer:\nNUDITY: Y\nPARTNER: Y\nGENITALS: Y\nINSERTED: N\nCUMLOC: VAGINA\n"
+    "BOUND: N\nSPECIES: NONE\nLACTATING: N"
 )
 
 def _parse_video_signal(text: str) -> dict:
@@ -1104,22 +1105,32 @@ def _parse_video_signal(text: str) -> dict:
     if "TITLECARD" in t:
         return {
             "titlecard": True, "nudity": False, "partner_visible": False, "state": "NONE",
-            "bound": False, "species": None, "lactating": False,
+            "cum_location": None, "bound": False, "species": None, "lactating": False,
         }
     nudity = bool(re.search(r"NUDITY\s*:\s*Y", t))
     partner_visible = bool(re.search(r"PARTNER\s*:\s*Y", t))
     genitals_visible = bool(re.search(r"GENITALS\s*:\s*Y", t))
-    if re.search(r"STATE\s*:\s*INSERTED", t):
+    inserted = bool(re.search(r"INSERTED\s*:\s*Y", t))
+
+    # Ask the model *where* the cum is (a factual observation it's good at) and decide what
+    # counts here in code, rather than asking it to apply the "only vaginal counts" rule
+    # itself -- it kept ignoring that instruction and reporting facials and cum-on-tits as
+    # creampies, which put them in Single Creampie.
+    m = re.search(r"CUMLOC\s*:\s*(VAGINA|FACE|TITS|ASS|BODY|NONE)\b", t)
+    cum_location = m.group(1).lower() if m else None
+
+    if inserted:
         state = "INSERTED"
-    elif re.search(r"STATE\s*:\s*CUM", t):
+    elif cum_location == "vagina":
         state = "CUM"
     else:
         state = "NONE"
-    # Defense in depth: even though the prompt tells the model STATE must be NONE when
-    # GENITALS is N, it doesn't reliably comply -- confirmed in testing, a frame showing
-    # milk streaming from a nipple with no genitals anywhere in view was still read as
-    # STATE: CUM. Overriding here doesn't depend on the model getting that instruction right.
-    if not genitals_visible:
+
+    # Defense in depth: the model doesn't reliably honor "you can't answer VAGINA when
+    # GENITALS is N" -- confirmed earlier, a frame of milk streaming from a nipple with no
+    # genitals in view still came back as a creampie. Enforcing it here doesn't depend on
+    # the model following that instruction.
+    if not genitals_visible and state == "CUM":
         state = "NONE"
     bound = bool(re.search(r"BOUND\s*:\s*Y", t))
     # Matched against a fixed vocabulary with a trailing word boundary rather than a bare
@@ -1135,7 +1146,7 @@ def _parse_video_signal(text: str) -> dict:
     lactating = bool(re.search(r"LACTATING\s*:\s*Y", t))
     return {
         "titlecard": False, "nudity": nudity, "partner_visible": partner_visible, "state": state,
-        "bound": bound, "species": species, "lactating": lactating,
+        "cum_location": cum_location, "bound": bound, "species": species, "lactating": lactating,
     }
 
 # Anthropomorphic/furry art -- deliberately keys off words our own prompt uses for
