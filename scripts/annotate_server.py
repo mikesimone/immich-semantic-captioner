@@ -103,6 +103,7 @@ HTML = """<!doctype html><meta charset=utf-8>
  .vid{padding:10px 12px;cursor:pointer;border-bottom:1px solid #262626;font-size:13px}
  .vid.on{background:#2d4a2d} .vid .n{color:#777;font-size:11px;margin-top:2px}
  .vid.done{opacity:.55} .vid.done .n{color:#5a8a5a}
+ #segs{max-height:34vh;overflow-y:auto;border-top:1px solid #262626;border-bottom:1px solid #262626}
  .seg{padding:9px 12px;border-bottom:1px solid #262626;display:flex;
       justify-content:space-between;align-items:center;font-size:13px}
  .seg b{color:#7ec87e;font-weight:600}
@@ -168,6 +169,7 @@ HTML = """<!doctype html><meta charset=utf-8>
   <div id=bar>
     <span>t=<b id=t>0.00</b></span>
     <span id=pend>tap MARK START at the beginning of an event</span>
+    <span id=dur style="color:#777"></span>
     <span id=status style="margin-left:auto;color:#777"></span>
   </div>
   <div id=help>
@@ -178,7 +180,7 @@ HTML = """<!doctype html><meta charset=utf-8>
 </div>
 <div id=side>
   <button id=done onclick="toggleDone()">mark video complete</button>
-  <h3>segments (newest first)</h3><div id=segs></div>
+  <h3 id=sh>segments &mdash; this video</h3><div id=segs></div>
   <h3>label balance</h3><div id=stats></div>
   <h3>to do</h3>
   <select id=filter onchange="drawVids()"></select>
@@ -186,7 +188,7 @@ HTML = """<!doctype html><meta charset=utf-8>
   <h3 id=ch>completed</h3><div id=cvids></div>
 </div>
 <script>
-const LABELS=%LABELS%; let VIDS=[], cur=-1, segs=[], pend=null, lbl=LABELS[0], lastAdded=-1;
+const LABELS=%LABELS%; let VIDS=[], cur=-1, segs=[], pend=null, lbl=LABELS[0], lastAdded=-1, vdur=0;
 const v=document.getElementById('v');
 const $=(i)=>document.getElementById(i);
 function fmt(s){const m=Math.floor(s/60),x=(s%60).toFixed(2).padStart(5,'0');return m+':'+x}
@@ -222,7 +224,7 @@ function drawVids(){
 }
 async function load(i){
   if(cur>=0) await save();
-  cur=i; setPend(null); lastAdded=-1; v.src='/video/'+VIDS[i].id;
+  cur=i; setPend(null); lastAdded=-1; vdur=0; $('dur').textContent=''; v.src='/video/'+VIDS[i].id;
   segs=await (await fetch('/api/labels/'+VIDS[i].id)).json();
   drawVids(); drawSegs(); drawDone(); $('status').textContent=VIDS[i].name;
   window.scrollTo(0,0);
@@ -241,6 +243,7 @@ function drawSegs(){
     <span style=color:#666>(${(s.end-s.start).toFixed(1)}s)</span></span>
     <span class=x onclick="del(${i})">&times;</span></div>`).join('')
     || '<div class=seg style=color:#666>none yet</div>';
+  $('sh').innerHTML='segments &mdash; this video ('+segs.length+', newest first)';
   if(cur>=0){VIDS[cur].nseg=segs.length;drawVids()}
 }
 async function save(){ if(cur<0)return;
@@ -283,7 +286,18 @@ document.onkeydown=e=>{
   else if(k=='n'&&cur<VIDS.length-1){load(cur+1)}
   else if(k=='p'&&cur>0){load(cur-1)}
 };
-v.ontimeupdate=()=>$('t').textContent=v.currentTime.toFixed(2);
+v.ontimeupdate=()=>{
+  $('t').textContent=v.currentTime.toFixed(2);
+  if(v.currentTime>vdur+1 && vdur>0){
+    $('dur').innerHTML='<span style=color:#e8a030>past declared end '+fmt(vdur)+
+      ' \u2014 metadata is wrong, marks still valid</span>';
+  }
+};
+v.ondurationchange=()=>{ if(isFinite(v.duration)&&v.duration>0){
+  const meta=(VIDS[cur]&&VIDS[cur].duration_ms)?VIDS[cur].duration_ms/1000:0;
+  vdur=Math.max(v.duration, meta);
+  $('dur').textContent='len '+fmt(vdur);
+}};
 v.onplay=()=>$('bPlay').innerHTML='&#10073;&#10073;';
 v.onpause=()=>$('bPlay').innerHTML='&#9654;';
 window.onbeforeunload=save; boot();
