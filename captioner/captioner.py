@@ -119,6 +119,11 @@ HUCOW_ALBUM_ID = os.environ.get("HUCOW_ALBUM_ID", "d526cf69-8aed-4fdc-b93e-6daca
 # nudity found outside them is parked at "Please categorize" for manual sorting instead of
 # being guessed at.
 MULTI_CREAMPIE_PREFIX = os.environ.get("MULTI_CREAMPIE_PREFIX", "200.000.")
+
+# For single-creampie detection, ignore any CUM sighting before this fraction of the way
+# through the video -- the creampie ends the scene, so an early one is a classifier
+# confabulation rather than the real thing.
+CREAMPIE_EARLIEST_FRACTION = float(os.environ.get("CREAMPIE_EARLIEST_FRACTION", "0.5"))
 # Which albums count as "the human already filed this", so it gets captioned instead of
 # parked at "Please categorize". Empty (the default) means ANY album membership qualifies,
 # which is the intent: freshly-imported porn lands in no album and needs sorting, while
@@ -1372,6 +1377,15 @@ def caption_video(
             # latest CUM reading with insertion evidence behind it is the best estimate of
             # the real moment, and it also naturally loses to any earlier isolated false
             # positive if a later, better-supported reading exists.
+            #
+            # For the same reason, ignore sightings in the opening stretch of the video
+            # entirely. The per-frame classifier does confabulate -- observed a fully-clothed
+            # setup scene one minute into a twenty-minute video answering GENITALS: Y,
+            # CUMLOC: VAGINA -- and an early "creampie" is essentially always one of those,
+            # because the scene hasn't happened yet.
+            last_ts = signals[-1]["ts"] if signals else 0.0
+            earliest_plausible = last_ts * CREAMPIE_EARLIEST_FRACTION
+
             cum_ts = None
             seen_insertion = False
             seen_partner = False
@@ -1380,7 +1394,8 @@ def caption_video(
                     seen_partner = True
                 if s["state"] == "INSERTED":
                     seen_insertion = True
-                elif s["state"] == "CUM" and seen_insertion and seen_partner:
+                elif (s["state"] == "CUM" and seen_insertion and seen_partner
+                      and s["ts"] >= earliest_plausible):
                     cum_ts = s["ts"]
             count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
         else:
