@@ -26,9 +26,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LABEL_DIR = os.path.join(REPO, "training-data", "labels")
 
-# Hotkeys 1-6. "creampie" is the target class; the rest are the confusable negatives that
-# have actually bitten us -- those are scarcer and more valuable than the positives.
-LABELS = ["creampie", "facial", "cum-on-tits", "anal-cum", "pullout-no-cum", "lube"]
+# Hotkeys 1-7. "creampie" is the target class (cum inside / dripping out of her); the rest
+# are the confusable negatives that have actually bitten us -- scarcer and more valuable
+# than the positives. "cum-on-pussy" is external cum on the vulva, which looks very close
+# to a creampie in a still frame and is exactly the distinction the classifier keeps
+# getting wrong.
+LABELS = ["creampie", "cum-on-pussy", "facial", "cum-on-tits", "anal-cum",
+          "pullout-no-cum", "lube"]
 
 
 def load_env():
@@ -119,6 +123,9 @@ HTML = """<!doctype html><meta charset=utf-8>
  #bStart{background:#2d6a2d} #bStart:active{background:#3d8a3d}
  #bEnd{background:#7a4a1a} #bEnd:active{background:#9a6a2a}
  #bEnd.armed{background:#a03030} #bEnd.armed:active{background:#c04040}
+ #bCancel{flex:0 0 68px;background:#3a3a3a;font-size:22px;line-height:1}
+ #bCancel:active{background:#555}
+ #bCancel:disabled{opacity:.3}
  #bar{padding:6px 10px;background:#1c1c1c;display:flex;gap:12px;align-items:center;
       flex-wrap:wrap;font-size:13px}
  #pend{color:#e8c07d;font-weight:600}
@@ -137,16 +144,17 @@ HTML = """<!doctype html><meta charset=utf-8>
   <video id=v controls playsinline preload=auto></video>
   <div id=labels></div>
   <div id=transport>
-    <div class=tb onclick="seek(-10)">&#171; 10s</div>
+    <div class=tb onclick="seek(-5)">&#171; 5s</div>
     <div class=tb onclick="seek(-1)">&#8249; 1s</div>
     <div class=tb onclick="seek(-0.1)">&#8249;</div>
     <div class=tb id=bPlay onclick="toggle()">&#9654;</div>
     <div class=tb onclick="seek(0.1)">&#8250;</div>
     <div class=tb onclick="seek(1)">1s &#8250;</div>
-    <div class=tb onclick="seek(10)">10s &#187;</div>
+    <div class=tb onclick="seek(5)">5s &#187;</div>
   </div>
   <div id=mark>
     <button class=mk id=bStart onclick="markStart()">[ &nbsp;MARK START</button>
+    <button class=mk id=bCancel onclick="cancelPend()" disabled>&#10007;</button>
     <button class=mk id=bEnd onclick="markEnd()">MARK END&nbsp; ]</button>
   </div>
   <div id=bar>
@@ -155,9 +163,9 @@ HTML = """<!doctype html><meta charset=utf-8>
     <span id=status style="margin-left:auto;color:#777"></span>
   </div>
   <div id=help>
-    <kbd>space</kbd> play/pause &nbsp; <kbd>&larr;/&rarr;</kbd> 1s &nbsp; <kbd>shift+&larr;/&rarr;</kbd> 10s &nbsp;
+    <kbd>space</kbd> play/pause &nbsp; <kbd>&larr;/&rarr;</kbd> 1s &nbsp; <kbd>shift+&larr;/&rarr;</kbd> 5s &nbsp;
     <kbd>,</kbd>/<kbd>.</kbd> 0.1s &nbsp; <kbd>[</kbd> start &nbsp; <kbd>]</kbd> end &nbsp;
-    <kbd>1-6</kbd> label &nbsp; <kbd>n</kbd>/<kbd>p</kbd> video &nbsp; <kbd>esc</kbd> cancel
+    <kbd>1-7</kbd> label &nbsp; <kbd>n</kbd>/<kbd>p</kbd> video &nbsp; <kbd>esc</kbd> cancel
   </div>
 </div>
 <div id=side>
@@ -207,8 +215,10 @@ async function save(){ if(cur<0)return;
   drawStats();
 }
 function del(i){segs.splice(i,1);drawSegs();save()}
+function cancelPend(){setPend(null); $('pend').textContent='start cancelled'}
 function setPend(x){pend=x;
   $('bEnd').classList.toggle('armed', x!=null);
+  $('bCancel').disabled = x==null;
   $('pend').textContent = x==null ? 'tap MARK START at the beginning of an event'
     : '\u25cf '+lbl+' started at '+fmt(x)+' \u2014 now tap MARK END';
 }
@@ -226,12 +236,12 @@ document.onkeydown=e=>{
   if(e.target.tagName=='INPUT')return;
   const k=e.key;
   if(k==' '){e.preventDefault(); toggle()}
-  else if(k=='ArrowLeft'){e.preventDefault(); seek(e.shiftKey?-10:-1)}
-  else if(k=='ArrowRight'){e.preventDefault(); seek(e.shiftKey?10:1)}
+  else if(k=='ArrowLeft'){e.preventDefault(); seek(e.shiftKey?-5:-1)}
+  else if(k=='ArrowRight'){e.preventDefault(); seek(e.shiftKey?5:1)}
   else if(k==','){seek(-0.1)} else if(k=='.'){seek(0.1)}
   else if(k=='['){markStart()} else if(k==']'){markEnd()}
-  else if(k=='Escape'){setPend(null)}
-  else if(k>='1'&&k<='6'){const i=+k-1; if(i<LABELS.length){pick(LABELS[i])}}
+  else if(k=='Escape'){cancelPend()}
+  else if(k>='1'&&k<='7'){const i=+k-1; if(i<LABELS.length){pick(LABELS[i])}}
   else if(k=='n'&&cur<VIDS.length-1){load(cur+1)}
   else if(k=='p'&&cur>0){load(cur-1)}
 };
