@@ -62,7 +62,7 @@ def album_id_by_name(name):
     raise SystemExit(f"album not found: {name}")
 
 
-def album_videos(album_id):
+def album_videos(album_id, album_name=""):
     out, page = [], 1
     while True:
         d = immich("/api/search/metadata",
@@ -72,7 +72,7 @@ def album_videos(album_id):
             break
         for a in items:
             out.append({"id": a["id"], "name": a.get("originalFileName", a["id"]),
-                        "duration_ms": a.get("duration")})
+                        "duration_ms": a.get("duration"), "album": album_name})
         nxt = d.get("assets", {}).get("nextPage")
         if nxt is None:
             break
@@ -98,6 +98,8 @@ HTML = """<!doctype html><meta charset=utf-8><title>segment annotator</title>
  kbd{background:#333;border-radius:3px;padding:1px 5px;font-size:11px}
  #pend{color:#e8c07d;font-weight:600}
  #help{padding:8px 12px;color:#777;font-size:11px;border-top:1px solid #333}
+ .st{padding:3px 12px;display:flex;justify-content:space-between;font-size:12px}
+ .st .c{color:#7ec87e;font-weight:600} .st.zero .c{color:#c66}
  #labels{padding:8px 12px;background:#181818;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
  .lb{background:#2a2a2a;border:1px solid #3a3a3a;color:#bbb;border-radius:4px;padding:5px 10px;
      cursor:pointer;font-size:12px;user-select:none}
@@ -121,21 +123,31 @@ HTML = """<!doctype html><meta charset=utf-8><title>segment annotator</title>
     <kbd>1-6</kbd> pick label (or click above) &nbsp; <kbd>n</kbd>/<kbd>p</kbd> next/prev video &nbsp; <kbd>esc</kbd> cancel
   </div>
 </div>
-<div id=side><h3>videos</h3><div id=vids></div><h3>segments</h3><div id=segs></div></div>
+<div id=side><h3>label balance</h3><div id=stats></div>
+ <h3>videos</h3><div id=vids></div><h3>segments</h3><div id=segs></div></div>
 <script>
 const LABELS=%LABELS%; let VIDS=[], cur=-1, segs=[], pend=null, lbl=LABELS[0];
 const v=document.getElementById('v');
 const $=(i)=>document.getElementById(i);
 function fmt(s){const m=Math.floor(s/60),x=(s%60).toFixed(2).padStart(5,'0');return m+':'+x}
-async function boot(){drawLabels();VIDS=await (await fetch('/api/videos')).json();drawVids();if(VIDS.length)load(0)}
+async function boot(){drawLabels();drawStats();VIDS=await (await fetch('/api/videos')).json();drawVids();if(VIDS.length)load(0)}
 function drawLabels(){
   const el=document.getElementById('labels');
   el.innerHTML='<span style="color:#777;font-size:11px">MARK AS:</span>'+LABELS.map((L,i)=>
     `<span class="lb${L==lbl?' on':''}" onclick="pick('${L}')"><span class=k>${i+1}</span>${L}</span>`).join('');
 }
 function pick(L){lbl=L;drawLabels()}
+async function drawStats(){
+  const d=await (await fetch('/api/stats')).json();
+  $('stats').innerHTML=LABELS.map(L=>{
+    const n=d.counts[L]||0;
+    return `<div class="st${n?'':' zero'}"><span>${L}</span><span class=c>${n}</span></div>`}).join('')
+    +`<div class=st style="border-top:1px solid #333;margin-top:4px;padding-top:5px">
+       <span style=color:#777>videos labelled</span><span class=c>${d.videos_with_segments}</span></div>`;
+}
 function drawVids(){$('vids').innerHTML=VIDS.map((x,i)=>
-  `<div class="vid${i==cur?' on':''}" onclick="load(${i})">${x.name}<div class=n>${x.nseg||0} segments</div></div>`).join('')}
+  `<div class="vid${i==cur?' on':''}" onclick="load(${i})">${x.name}
+     <div class=n>${(x.album||'').replace(/^[0-9.]+ - /,'')} &middot; ${x.nseg||0} seg</div></div>`).join('')}
 async function load(i){
   if(cur>=0) await save();
   cur=i; pend=null; v.src='/video/'+VIDS[i].id;
@@ -153,6 +165,7 @@ function drawSegs(){
 async function save(){ if(cur<0)return;
   await fetch('/api/labels/'+VIDS[cur].id,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name:VIDS[cur].name,duration_ms:VIDS[cur].duration_ms,segments:segs})});
+  drawStats();
 }
 function del(i){segs.splice(i,1);drawSegs();save()}
 document.onkeydown=e=>{
@@ -200,6 +213,21 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif p == "/api/videos":
             self._json(VIDEOS)
+        elif p == "/api/stats":
+            counts, vids_done = {}, 0
+            if os.path.isdir(LABEL_DIR):
+                for fn in os.listdir(LABEL_DIR):
+                    if not fn.endswith(".json"):
+                        continue
+                    try:
+                        segs = json.load(open(os.path.join(LABEL_DIR, fn))).get("segments", [])
+                    except (OSError, ValueError):
+                        continue
+                    if segs:
+                        vids_done += 1
+                    for sg in segs:
+                        counts[sg["label"]] = counts.get(sg["label"], 0) + 1
+            self._json({"counts": counts, "videos_with_segments": vids_done})
         elif p.startswith("/api/labels/"):
             aid = p.rsplit("/", 1)[1]
             fp = os.path.join(LABEL_DIR, aid + ".json")
@@ -254,17 +282,26 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--album", default="200.001.001 - Creampie Compilation")
+    ap.add_argument("--album", action="append", metavar="NAME",
+                    help="repeatable; defaults to Compilation + Single + Multiple")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
 
+    albums = args.album or ["200.001.001 - Creampie Compilation",
+                            "200.001.000 - Single Creampie",
+                            "200.000.000 - Multiple Creampie"]
     global VIDEOS
-    VIDEOS = album_videos(album_id_by_name(args.album))
+    seen = set()
+    for name in albums:
+        got = album_videos(album_id_by_name(name), name)
+        fresh = [v for v in got if v["id"] not in seen]
+        seen.update(v["id"] for v in fresh)
+        VIDEOS.extend(fresh)
+        print(f"album: {name:<40} {len(got):>4} videos ({len(fresh)} new)")
     os.makedirs(LABEL_DIR, exist_ok=True)
     done = sum(1 for v in VIDEOS
                if os.path.exists(os.path.join(LABEL_DIR, v["id"] + ".json")))
-    print(f"album: {args.album}")
-    print(f"videos: {len(VIDEOS)}  ({done} already have a label file)")
+    print(f"total: {len(VIDEOS)} unique videos ({done} already have a label file)")
     print(f"labels -> {LABEL_DIR}")
     print(f"\n  http://localhost:{args.port}/   (or http://wopr:{args.port}/)\n")
     ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
