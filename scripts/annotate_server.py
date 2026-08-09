@@ -93,27 +93,33 @@ HTML = """<!doctype html><meta charset=utf-8>
  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
  body{background:#141414;color:#ddd;font:14px/1.4 system-ui,sans-serif;margin:0;
       display:flex;height:100dvh;overflow:hidden}
- #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+ #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;padding-top:8px}
  video{width:100%;flex:1;min-height:0;background:#000}
- #side{width:330px;background:#1a1a1a;overflow:auto;border-left:1px solid #333;flex-shrink:0}
+ /* the big centre play overlay covers exactly the frame you're trying to inspect */
+ video::-webkit-media-controls-overlay-play-button{display:none!important}
+ video::-webkit-media-controls-start-playback-button{display:none!important;-webkit-appearance:none}
+ #side{width:340px;background:#1a1a1a;overflow:auto;border-left:1px solid #333;flex-shrink:0}
  h3{margin:12px 12px 6px;font-size:12px;text-transform:uppercase;color:#888;letter-spacing:.5px}
  .vid{padding:10px 12px;cursor:pointer;border-bottom:1px solid #262626;font-size:13px}
  .vid.on{background:#2d4a2d} .vid .n{color:#777;font-size:11px;margin-top:2px}
+ .vid.done{opacity:.55} .vid.done .n{color:#5a8a5a}
  .seg{padding:9px 12px;border-bottom:1px solid #262626;display:flex;
       justify-content:space-between;align-items:center;font-size:13px}
  .seg b{color:#7ec87e;font-weight:600}
+ .seg.new{background:#22301f}
  .x{color:#c66;cursor:pointer;padding:4px 10px;font-size:18px}
  .st{padding:3px 12px;display:flex;justify-content:space-between;font-size:12px}
  .st .c{color:#7ec87e;font-weight:600} .st.zero .c{color:#c66}
  #labels{padding:6px 8px;background:#181818;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+ #labels.locked .lb{opacity:.3} #labels.locked .lb.on{opacity:1}
  .lb{background:#2a2a2a;border:1px solid #3a3a3a;color:#bbb;border-radius:6px;
-     padding:9px 12px;cursor:pointer;font-size:13px;user-select:none;flex:1;text-align:center;
+     padding:9px 10px;cursor:pointer;font-size:13px;user-select:none;flex:1;text-align:center;
      min-height:42px;display:flex;align-items:center;justify-content:center;gap:5px}
  .lb.on{background:#2d5a2d;border-color:#5aa85a;color:#eaffea;font-weight:600}
  .lb .k{background:#111;border-radius:3px;padding:0 4px;font-size:10px;color:#888}
  .lb.on .k{color:#cfc}
  #transport{display:flex;gap:6px;padding:6px 8px;background:#1c1c1c}
- .tb{flex:1;min-height:52px;background:#262626;border:1px solid #3a3a3a;border-radius:6px;
+ .tb{flex:1;min-height:50px;background:#262626;border:1px solid #3a3a3a;border-radius:6px;
      color:#ddd;font-size:15px;cursor:pointer;user-select:none;display:flex;
      align-items:center;justify-content:center;font-weight:600}
  .tb:active{background:#3a3a3a}
@@ -124,20 +130,22 @@ HTML = """<!doctype html><meta charset=utf-8>
  #bEnd{background:#7a4a1a} #bEnd:active{background:#9a6a2a}
  #bEnd.armed{background:#a03030} #bEnd.armed:active{background:#c04040}
  #bCancel{flex:0 0 68px;background:#3a3a3a;font-size:22px;line-height:1}
- #bCancel:active{background:#555}
- #bCancel:disabled{opacity:.3}
+ #bCancel:active{background:#555} #bCancel:disabled{opacity:.3}
  #bar{padding:6px 10px;background:#1c1c1c;display:flex;gap:12px;align-items:center;
       flex-wrap:wrap;font-size:13px}
  #pend{color:#e8c07d;font-weight:600}
+ #done{margin:0 8px 8px;padding:12px;width:calc(100% - 16px);border:1px solid #3a3a3a;
+       border-radius:8px;background:#242424;color:#bbb;font-size:14px;font-weight:600;cursor:pointer}
+ #done.is{background:#2d5a2d;border-color:#5aa85a;color:#eaffea}
+ #filter{margin:0 12px 8px;width:calc(100% - 24px);padding:8px;background:#242424;
+         color:#ddd;border:1px solid #3a3a3a;border-radius:6px;font-size:13px}
  #help{padding:6px 10px;color:#666;font-size:11px;border-top:1px solid #333}
  kbd{background:#333;border-radius:3px;padding:1px 5px;font-size:11px}
  @media (max-width:900px){
    body{flex-direction:column;overflow:auto}
-   #main{flex:none}
-   video{height:36dvh;flex:none}
+   #main{flex:none} video{height:34dvh;flex:none}
    #side{width:100%;border-left:none;border-top:1px solid #333;overflow:visible}
-   #help{display:none}
-   .lb{font-size:12px;padding:9px 6px;min-width:30%}
+   #help{display:none} .lb{font-size:12px;padding:9px 5px;min-width:29%}
  }
 </style>
 <div id=main>
@@ -169,41 +177,67 @@ HTML = """<!doctype html><meta charset=utf-8>
   </div>
 </div>
 <div id=side>
+  <button id=done onclick="toggleDone()">mark video complete</button>
+  <h3>segments (newest first)</h3><div id=segs></div>
   <h3>label balance</h3><div id=stats></div>
-  <h3>segments (this video)</h3><div id=segs></div>
-  <h3>videos</h3><div id=vids></div>
+  <h3>to do</h3>
+  <select id=filter onchange="drawVids()"></select>
+  <div id=vids></div>
+  <h3 id=ch>completed</h3><div id=cvids></div>
 </div>
 <script>
-const LABELS=%LABELS%; let VIDS=[], cur=-1, segs=[], pend=null, lbl=LABELS[0];
+const LABELS=%LABELS%; let VIDS=[], cur=-1, segs=[], pend=null, lbl=LABELS[0], lastAdded=-1;
 const v=document.getElementById('v');
 const $=(i)=>document.getElementById(i);
 function fmt(s){const m=Math.floor(s/60),x=(s%60).toFixed(2).padStart(5,'0');return m+':'+x}
+function shortAlbum(a){return (a||'').replace(/^[0-9.]+ - /,'')}
 async function boot(){drawLabels();drawStats();
-  VIDS=await (await fetch('/api/videos')).json();drawVids();if(VIDS.length)load(0)}
-function drawLabels(){$('labels').innerHTML=LABELS.map((L,i)=>
-  `<div class="lb${L==lbl?' on':''}" onclick="pick('${L}')"><span class=k>${i+1}</span>${L}</div>`).join('')}
-function pick(L){lbl=L;drawLabels()}
+  VIDS=await (await fetch('/api/videos')).json();
+  const albums=[...new Set(VIDS.map(x=>x.album))];
+  $('filter').innerHTML='<option value="">all albums ('+VIDS.length+')</option>'+
+    albums.map(a=>`<option value="${a}">${shortAlbum(a)} (${VIDS.filter(x=>x.album==a).length})</option>`).join('');
+  drawVids(); const first=VIDS.findIndex(x=>!x.done); if(VIDS.length) load(first<0?0:first);
+}
+function drawLabels(){
+  $('labels').innerHTML=LABELS.map((L,i)=>
+    `<div class="lb${L==lbl?' on':''}" onclick="pick('${L}')"><span class=k>${i+1}</span>${L}</div>`).join('');
+  $('labels').classList.toggle('locked', pend!=null);
+}
+function pick(L){ if(pend!=null) return; lbl=L; drawLabels() }
 async function drawStats(){
   const d=await (await fetch('/api/stats')).json();
   $('stats').innerHTML=LABELS.map(L=>{const n=d.counts[L]||0;
-    return `<div class="st${n?'':' zero'}"><span>${L}</span><span class=c>${n}</span></div>`}).join('')
-    +`<div class=st style="border-top:1px solid #333;margin-top:4px;padding-top:5px">
-       <span style=color:#777>videos labelled</span><span class=c>${d.videos_with_segments}</span></div>`;
+    return `<div class="st${n?'':' zero'}"><span>${L}</span><span class=c>${n}</span></div>`}).join('');
 }
-function drawVids(){$('vids').innerHTML=VIDS.map((x,i)=>
-  `<div class="vid${i==cur?' on':''}" onclick="load(${i})">${x.name}
-     <div class=n>${(x.album||'').replace(/^[0-9.]+ - /,'')} &middot; ${x.nseg||0} seg</div></div>`).join('')}
+function drawVids(){
+  const f=$('filter').value;
+  const row=(x,i)=>`<div class="vid${i==cur?' on':''}${x.done?' done':''}" onclick="load(${i})">${x.name}
+     <div class=n>${shortAlbum(x.album)} &middot; ${x.nseg||0} seg${x.done?' &middot; \u2713 done':''}</div></div>`;
+  const idx=VIDS.map((x,i)=>[x,i]).filter(([x])=>!f||x.album==f);
+  $('vids').innerHTML=idx.filter(([x])=>!x.done).map(([x,i])=>row(x,i)).join('')
+    ||'<div class=vid style=color:#666>nothing left here</div>';
+  const done=idx.filter(([x])=>x.done);
+  $('ch').textContent='completed ('+done.length+')';
+  $('cvids').innerHTML=done.map(([x,i])=>row(x,i)).join('')||'<div class=vid style=color:#666>none yet</div>';
+}
 async function load(i){
   if(cur>=0) await save();
-  cur=i; setPend(null); v.src='/video/'+VIDS[i].id;
+  cur=i; setPend(null); lastAdded=-1; v.src='/video/'+VIDS[i].id;
   segs=await (await fetch('/api/labels/'+VIDS[i].id)).json();
-  drawVids(); drawSegs(); $('status').textContent=VIDS[i].name;
+  drawVids(); drawSegs(); drawDone(); $('status').textContent=VIDS[i].name;
   window.scrollTo(0,0);
 }
+function drawDone(){const d=cur>=0&&VIDS[cur].done;
+  $('done').classList.toggle('is',d);
+  $('done').textContent=d?'\u2713 complete \u2014 tap to reopen':'mark video complete'}
+async function toggleDone(){ if(cur<0)return; VIDS[cur].done=!VIDS[cur].done;
+  drawDone(); drawVids(); await save();
+  if(VIDS[cur].done){const nx=VIDS.findIndex(x=>!x.done); if(nx>=0&&nx!=cur) load(nx)} }
 function drawSegs(){
   segs.sort((a,b)=>a.start-b.start);
-  $('segs').innerHTML=segs.map((s,i)=>
-   `<div class=seg><span><b>${s.label}</b> ${fmt(s.start)} &rarr; ${fmt(s.end)}
+  const disp=segs.map((s,i)=>[s,i]).sort((a,b)=>b[0].start-a[0].start);
+  $('segs').innerHTML=disp.map(([s,i])=>
+   `<div class="seg${i==lastAdded?' new':''}"><span><b>${s.label}</b> ${fmt(s.start)} &rarr; ${fmt(s.end)}
     <span style=color:#666>(${(s.end-s.start).toFixed(1)}s)</span></span>
     <span class=x onclick="del(${i})">&times;</span></div>`).join('')
     || '<div class=seg style=color:#666>none yet</div>';
@@ -211,14 +245,16 @@ function drawSegs(){
 }
 async function save(){ if(cur<0)return;
   await fetch('/api/labels/'+VIDS[cur].id,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name:VIDS[cur].name,duration_ms:VIDS[cur].duration_ms,segments:segs})});
+    body:JSON.stringify({name:VIDS[cur].name,duration_ms:VIDS[cur].duration_ms,
+                         done:!!VIDS[cur].done,segments:segs})});
   drawStats();
 }
-function del(i){segs.splice(i,1);drawSegs();save()}
+function del(i){segs.splice(i,1);lastAdded=-1;drawSegs();save()}
 function cancelPend(){setPend(null); $('pend').textContent='start cancelled'}
 function setPend(x){pend=x;
   $('bEnd').classList.toggle('armed', x!=null);
   $('bCancel').disabled = x==null;
+  drawLabels();
   $('pend').textContent = x==null ? 'tap MARK START at the beginning of an event'
     : '\u25cf '+lbl+' started at '+fmt(x)+' \u2014 now tap MARK END';
 }
@@ -228,12 +264,14 @@ function markStart(){setPend(v.currentTime)}
 function markEnd(){
   if(pend==null){$('pend').textContent='tap MARK START first';return}
   const a=Math.min(pend,v.currentTime), b=Math.max(pend,v.currentTime);
-  segs.push({label:lbl,start:+a.toFixed(2),end:+b.toFixed(2)});
-  setPend(null); $('pend').textContent='saved '+lbl+' '+fmt(a)+' \u2192 '+fmt(b);
+  const rec={label:lbl,start:+a.toFixed(2),end:+b.toFixed(2)};
+  segs.push(rec); setPend(null);
+  segs.sort((x,y)=>x.start-y.start); lastAdded=segs.indexOf(rec);
+  $('pend').textContent='saved '+rec.label+' '+fmt(a)+' \u2192 '+fmt(b);
   drawSegs(); save();
 }
 document.onkeydown=e=>{
-  if(e.target.tagName=='INPUT')return;
+  if(e.target.tagName=='INPUT'||e.target.tagName=='SELECT')return;
   const k=e.key;
   if(k==' '){e.preventDefault(); toggle()}
   else if(k=='ArrowLeft'){e.preventDefault(); seek(e.shiftKey?-5:-1)}
@@ -274,7 +312,18 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif p == "/api/videos":
-            self._json(VIDEOS)
+            out = []
+            for v in VIDEOS:
+                fp = os.path.join(LABEL_DIR, v["id"] + ".json")
+                done, nseg = False, 0
+                if os.path.exists(fp):
+                    try:
+                        d = json.load(open(fp))
+                        done, nseg = bool(d.get("done")), len(d.get("segments", []))
+                    except (OSError, ValueError):
+                        pass
+                out.append({**v, "done": done, "nseg": nseg})
+            self._json(out)
         elif p == "/api/stats":
             counts, vids_done = {}, 0
             if os.path.isdir(LABEL_DIR):
@@ -309,6 +358,7 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs(LABEL_DIR, exist_ok=True)
         rec = {"asset_id": aid, "name": payload.get("name"),
                "duration_ms": payload.get("duration_ms"),
+               "done": bool(payload.get("done")),
                "segments": payload.get("segments", [])}
         with open(os.path.join(LABEL_DIR, aid + ".json"), "w") as fh:
             json.dump(rec, fh, indent=2)
@@ -351,7 +401,9 @@ def main():
 
     albums = args.album or ["200.001.001 - Creampie Compilation",
                             "200.001.000 - Single Creampie",
-                            "200.000.000 - Multiple Creampie"]
+                            "200.000.000 - Multiple Creampie",
+                            "200.010.001 - Masturbation",
+                            "200.010.000 - Internet Titties"]
     global VIDEOS
     seen = set()
     for name in albums:
