@@ -99,10 +99,8 @@ DENSE_SAMPLING_ALBUM_KEYWORDS = os.environ.get("DENSE_SAMPLING_ALBUM_KEYWORDS", 
 DENSE_INTERVAL_SECONDS = float(os.environ.get("DENSE_INTERVAL_SECONDS", "2"))
 DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "120"))
 
-# Auto-filing: any video with a detected creampie, regardless of which album it's manually
-# sorted into, gets added here (in addition to its existing albums, never removing it from
-# anywhere) -- unless it's already been manually placed in Multiple Creampie, which the
-# captioner never adds to or removes from (see is_multiple_creampie_album).
+# Retained for the cleanup/reset scripts only. The captioner itself no longer files anything
+# into Single Creampie -- creampie counts are reported in the caption and the human sorts.
 SINGLE_CREAMPIE_ALBUM_ID = os.environ.get("SINGLE_CREAMPIE_ALBUM_ID", "3a22144e-143c-4f43-a508-8b3f7fadbcb5")
 
 # Same idea for furry/anthro content -- any image or video whose caption indicates it,
@@ -1934,21 +1932,16 @@ def main():
                 if mode == "VIDEO-UNCATEGORIZED":
                     print(f"[parked] {asset_id} awaiting manual categorization", flush=True)
                 else:
-                    if asset_type == "VIDEO":
-                        # Multiple Creampie membership is purely manual (see
-                        # is_multiple_creampie_album) -- the captioner never adds an asset to
-                        # it and never removes one, only files newly-detected creampies into
-                        # Single Creampie for anything not already placed by hand.
-                        #
-                        # Single Creampie is a 100%-human album, so non-human content never
-                        # gets filed into it (caption_video already emits no count for those,
-                        # but the guard is explicit so the two can't drift apart).
-                        count_match = re.search(r"Separate Creampies\s*\|\s*(\d+)", caption, re.IGNORECASE)
-                        if count_match and not multiple and not nonhuman:
-                            n = int(count_match.group(1))
-                            if n >= 1:
-                                immich_add_to_album(asset_id, SINGLE_CREAMPIE_ALBUM_ID)
-                                immich_archive(asset_id)
+                    # Single AND Multiple Creampie membership are both purely manual now: the
+                    # captioner reports what it detected in the caption ("Separate Creampies |
+                    # 1 (~12:02)") but never files the asset into either album, and never
+                    # removes it from either. The human reads the caption and sorts.
+                    #
+                    # Auto-filing into Single Creampie is what put 80 wrongly-classified
+                    # videos there -- 56 of them from Bondage Creampie -- because any asset
+                    # already sitting in some album skipped the "Please categorize" park and
+                    # went straight through detection into filing. Detection is good enough to
+                    # inform a decision, not good enough to make one unattended.
 
                     # Feral is the one category that belongs in no additional album at all:
                     # it's a real, non-anthropomorphic animal, the opposite of furry, and its
