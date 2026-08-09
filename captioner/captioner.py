@@ -928,6 +928,9 @@ def is_feral_album(albums: List[str]) -> bool:
 # Multiple Creampie album -- the counting logic only runs for those. New multi-creampie
 # uploads are handled by the human moving them into that album and clearing the description
 # before the captioner ever sees them, not by the captioner guessing.
+def is_single_creampie_album(albums: List[str]) -> bool:
+    return any("single creampie" in (album or "").lower() for album in (albums or []))
+
 def is_multiple_creampie_album(albums: List[str]) -> bool:
     # The whole 200.000.xxx range is multiple-creampie content: the base album plus its
     # studio/kink sub-albums (Puta Locura, Creampie Squad, Gangbang, Slutwife, Czech,
@@ -1288,6 +1291,7 @@ def caption_video(
     compilation: bool = False,
     feral: bool = False,
     multiple: bool = False,
+    single: bool = False,
     nonhuman: bool = False,
     full_caption: bool = False,
     masturbation: bool = False,
@@ -1335,10 +1339,16 @@ def caption_video(
             frames = extract_video_frames(video_path, dense=True)
             signals = _classify_video_frames(frames, caption_detailed)
 
-        if nonhuman or compilation or feral:
+        if nonhuman or compilation or feral or not (single or multiple):
             # No creampie count at all for non-human content (anthro/furry/feral) -- the
             # detection was built around live-action photography and doesn't reliably apply
             # to illustrated art.
+            #
+            # Creampie counting only runs for content the human has actually filed as a
+            # creampie -- Single Creampie, or the 200.000.xxx multi range. Everything else
+            # (Bondage / Cheating Wife / Prostitution / Internet Titties / Lactation /
+            # Masturbation / Hotwife ...) gets the compact caption with no count until it's
+            # filed, because the human sorts those into Single or Multiple by hand.
             #
             # Feral is included for a different reason: feral-on-human always ends in
             # ejaculation inside the woman, so the count carries no information -- it would
@@ -1877,7 +1887,8 @@ def main():
                 multiple = is_multiple_creampie_album(albums)
                 raw_caption, mode = caption_video(
                     asset_id, caption_detailed, person_names=person_names, dense=dense,
-                    compilation=compilation, feral=feral, multiple=multiple, nonhuman=nonhuman,
+                    compilation=compilation, feral=feral, multiple=multiple,
+                    single=is_single_creampie_album(albums), nonhuman=nonhuman,
                     full_caption=is_full_caption_album(albums),
                     masturbation=is_masturbation_album(albums),
                     categorized=is_categorized_album(albums),
