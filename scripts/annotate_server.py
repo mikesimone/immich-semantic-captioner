@@ -82,65 +82,102 @@ def album_videos(album_id, album_name=""):
 
 VIDEOS = []
 
-HTML = """<!doctype html><meta charset=utf-8><title>segment annotator</title>
+HTML = """<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>segment annotator</title>
 <style>
- body{background:#141414;color:#ddd;font:14px/1.4 system-ui,sans-serif;margin:0;display:flex;height:100vh}
- #main{flex:1;display:flex;flex-direction:column;min-width:0}
+ *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+ body{background:#141414;color:#ddd;font:14px/1.4 system-ui,sans-serif;margin:0;
+      display:flex;height:100dvh;overflow:hidden}
+ #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
  video{width:100%;flex:1;min-height:0;background:#000}
- #bar{padding:8px 12px;background:#1c1c1c;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
- #side{width:330px;background:#1a1a1a;overflow:auto;border-left:1px solid #333}
+ #side{width:330px;background:#1a1a1a;overflow:auto;border-left:1px solid #333;flex-shrink:0}
  h3{margin:12px 12px 6px;font-size:12px;text-transform:uppercase;color:#888;letter-spacing:.5px}
- .vid{padding:6px 12px;cursor:pointer;border-bottom:1px solid #262626;font-size:12px}
- .vid:hover{background:#242424} .vid.on{background:#2d4a2d} .vid .n{color:#777;font-size:11px}
- .seg{padding:5px 12px;border-bottom:1px solid #262626;display:flex;justify-content:space-between;font-size:12px}
+ .vid{padding:10px 12px;cursor:pointer;border-bottom:1px solid #262626;font-size:13px}
+ .vid.on{background:#2d4a2d} .vid .n{color:#777;font-size:11px;margin-top:2px}
+ .seg{padding:9px 12px;border-bottom:1px solid #262626;display:flex;
+      justify-content:space-between;align-items:center;font-size:13px}
  .seg b{color:#7ec87e;font-weight:600}
- .x{color:#c66;cursor:pointer;padding:0 4px}
- kbd{background:#333;border-radius:3px;padding:1px 5px;font-size:11px}
- #pend{color:#e8c07d;font-weight:600}
- #help{padding:8px 12px;color:#777;font-size:11px;border-top:1px solid #333}
+ .x{color:#c66;cursor:pointer;padding:4px 10px;font-size:18px}
  .st{padding:3px 12px;display:flex;justify-content:space-between;font-size:12px}
  .st .c{color:#7ec87e;font-weight:600} .st.zero .c{color:#c66}
- #labels{padding:8px 12px;background:#181818;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
- .lb{background:#2a2a2a;border:1px solid #3a3a3a;color:#bbb;border-radius:4px;padding:5px 10px;
-     cursor:pointer;font-size:12px;user-select:none}
- .lb:hover{background:#333}
- .lb.on{background:#2d5a2d;border-color:#4a8a4a;color:#eaffea;font-weight:600}
- .lb .k{display:inline-block;background:#111;border-radius:3px;padding:0 4px;margin-right:5px;
-        font-size:10px;color:#888}
+ #labels{padding:6px 8px;background:#181818;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+ .lb{background:#2a2a2a;border:1px solid #3a3a3a;color:#bbb;border-radius:6px;
+     padding:9px 12px;cursor:pointer;font-size:13px;user-select:none;flex:1;text-align:center;
+     min-height:42px;display:flex;align-items:center;justify-content:center;gap:5px}
+ .lb.on{background:#2d5a2d;border-color:#5aa85a;color:#eaffea;font-weight:600}
+ .lb .k{background:#111;border-radius:3px;padding:0 4px;font-size:10px;color:#888}
  .lb.on .k{color:#cfc}
+ #transport{display:flex;gap:6px;padding:6px 8px;background:#1c1c1c}
+ .tb{flex:1;min-height:52px;background:#262626;border:1px solid #3a3a3a;border-radius:6px;
+     color:#ddd;font-size:15px;cursor:pointer;user-select:none;display:flex;
+     align-items:center;justify-content:center;font-weight:600}
+ .tb:active{background:#3a3a3a}
+ #mark{display:flex;gap:8px;padding:0 8px 8px;background:#1c1c1c}
+ .mk{flex:1;min-height:60px;border-radius:8px;border:none;color:#fff;font-size:17px;
+     font-weight:700;cursor:pointer;user-select:none}
+ #bStart{background:#2d6a2d} #bStart:active{background:#3d8a3d}
+ #bEnd{background:#7a4a1a} #bEnd:active{background:#9a6a2a}
+ #bEnd.armed{background:#a03030} #bEnd.armed:active{background:#c04040}
+ #bar{padding:6px 10px;background:#1c1c1c;display:flex;gap:12px;align-items:center;
+      flex-wrap:wrap;font-size:13px}
+ #pend{color:#e8c07d;font-weight:600}
+ #help{padding:6px 10px;color:#666;font-size:11px;border-top:1px solid #333}
+ kbd{background:#333;border-radius:3px;padding:1px 5px;font-size:11px}
+ @media (max-width:900px){
+   body{flex-direction:column;overflow:auto}
+   #main{flex:none}
+   video{height:36dvh;flex:none}
+   #side{width:100%;border-left:none;border-top:1px solid #333;overflow:visible}
+   #help{display:none}
+   .lb{font-size:12px;padding:9px 6px;min-width:30%}
+ }
 </style>
 <div id=main>
-  <video id=v controls preload=auto></video>
-  <div id=labels><span style="color:#777;font-size:11px">MARK AS:</span></div>
+  <video id=v controls playsinline preload=auto></video>
+  <div id=labels></div>
+  <div id=transport>
+    <div class=tb onclick="seek(-10)">&#171; 10s</div>
+    <div class=tb onclick="seek(-1)">&#8249; 1s</div>
+    <div class=tb onclick="seek(-0.1)">&#8249;</div>
+    <div class=tb id=bPlay onclick="toggle()">&#9654;</div>
+    <div class=tb onclick="seek(0.1)">&#8250;</div>
+    <div class=tb onclick="seek(1)">1s &#8250;</div>
+    <div class=tb onclick="seek(10)">10s &#187;</div>
+  </div>
+  <div id=mark>
+    <button class=mk id=bStart onclick="markStart()">[ &nbsp;MARK START</button>
+    <button class=mk id=bEnd onclick="markEnd()">MARK END&nbsp; ]</button>
+  </div>
   <div id=bar>
     <span>t=<b id=t>0.00</b></span>
-    <span id=pend>press [ to start a segment</span>
+    <span id=pend>tap MARK START at the beginning of an event</span>
     <span id=status style="margin-left:auto;color:#777"></span>
   </div>
   <div id=help>
     <kbd>space</kbd> play/pause &nbsp; <kbd>&larr;/&rarr;</kbd> 1s &nbsp; <kbd>shift+&larr;/&rarr;</kbd> 10s &nbsp;
-    <kbd>,</kbd>/<kbd>.</kbd> frame &nbsp; <kbd>[</kbd> start &nbsp; <kbd>]</kbd> end+save &nbsp;
-    <kbd>1-6</kbd> pick label (or click above) &nbsp; <kbd>n</kbd>/<kbd>p</kbd> next/prev video &nbsp; <kbd>esc</kbd> cancel
+    <kbd>,</kbd>/<kbd>.</kbd> 0.1s &nbsp; <kbd>[</kbd> start &nbsp; <kbd>]</kbd> end &nbsp;
+    <kbd>1-6</kbd> label &nbsp; <kbd>n</kbd>/<kbd>p</kbd> video &nbsp; <kbd>esc</kbd> cancel
   </div>
 </div>
-<div id=side><h3>label balance</h3><div id=stats></div>
- <h3>videos</h3><div id=vids></div><h3>segments</h3><div id=segs></div></div>
+<div id=side>
+  <h3>label balance</h3><div id=stats></div>
+  <h3>segments (this video)</h3><div id=segs></div>
+  <h3>videos</h3><div id=vids></div>
+</div>
 <script>
 const LABELS=%LABELS%; let VIDS=[], cur=-1, segs=[], pend=null, lbl=LABELS[0];
 const v=document.getElementById('v');
 const $=(i)=>document.getElementById(i);
 function fmt(s){const m=Math.floor(s/60),x=(s%60).toFixed(2).padStart(5,'0');return m+':'+x}
-async function boot(){drawLabels();drawStats();VIDS=await (await fetch('/api/videos')).json();drawVids();if(VIDS.length)load(0)}
-function drawLabels(){
-  const el=document.getElementById('labels');
-  el.innerHTML='<span style="color:#777;font-size:11px">MARK AS:</span>'+LABELS.map((L,i)=>
-    `<span class="lb${L==lbl?' on':''}" onclick="pick('${L}')"><span class=k>${i+1}</span>${L}</span>`).join('');
-}
+async function boot(){drawLabels();drawStats();
+  VIDS=await (await fetch('/api/videos')).json();drawVids();if(VIDS.length)load(0)}
+function drawLabels(){$('labels').innerHTML=LABELS.map((L,i)=>
+  `<div class="lb${L==lbl?' on':''}" onclick="pick('${L}')"><span class=k>${i+1}</span>${L}</div>`).join('')}
 function pick(L){lbl=L;drawLabels()}
 async function drawStats(){
   const d=await (await fetch('/api/stats')).json();
-  $('stats').innerHTML=LABELS.map(L=>{
-    const n=d.counts[L]||0;
+  $('stats').innerHTML=LABELS.map(L=>{const n=d.counts[L]||0;
     return `<div class="st${n?'':' zero'}"><span>${L}</span><span class=c>${n}</span></div>`}).join('')
     +`<div class=st style="border-top:1px solid #333;margin-top:4px;padding-top:5px">
        <span style=color:#777>videos labelled</span><span class=c>${d.videos_with_segments}</span></div>`;
@@ -150,16 +187,18 @@ function drawVids(){$('vids').innerHTML=VIDS.map((x,i)=>
      <div class=n>${(x.album||'').replace(/^[0-9.]+ - /,'')} &middot; ${x.nseg||0} seg</div></div>`).join('')}
 async function load(i){
   if(cur>=0) await save();
-  cur=i; pend=null; v.src='/video/'+VIDS[i].id;
+  cur=i; setPend(null); v.src='/video/'+VIDS[i].id;
   segs=await (await fetch('/api/labels/'+VIDS[i].id)).json();
   drawVids(); drawSegs(); $('status').textContent=VIDS[i].name;
+  window.scrollTo(0,0);
 }
 function drawSegs(){
   segs.sort((a,b)=>a.start-b.start);
   $('segs').innerHTML=segs.map((s,i)=>
    `<div class=seg><span><b>${s.label}</b> ${fmt(s.start)} &rarr; ${fmt(s.end)}
     <span style=color:#666>(${(s.end-s.start).toFixed(1)}s)</span></span>
-    <span class=x onclick="del(${i})">&times;</span></div>`).join('') || '<div class=seg style=color:#666>none yet</div>';
+    <span class=x onclick="del(${i})">&times;</span></div>`).join('')
+    || '<div class=seg style=color:#666>none yet</div>';
   if(cur>=0){VIDS[cur].nseg=segs.length;drawVids()}
 }
 async function save(){ if(cur<0)return;
@@ -168,24 +207,37 @@ async function save(){ if(cur<0)return;
   drawStats();
 }
 function del(i){segs.splice(i,1);drawSegs();save()}
+function setPend(x){pend=x;
+  $('bEnd').classList.toggle('armed', x!=null);
+  $('pend').textContent = x==null ? 'tap MARK START at the beginning of an event'
+    : '\u25cf '+lbl+' started at '+fmt(x)+' \u2014 now tap MARK END';
+}
+function seek(d){v.currentTime=Math.max(0,v.currentTime+d)}
+function toggle(){v.paused?v.play():v.pause()}
+function markStart(){setPend(v.currentTime)}
+function markEnd(){
+  if(pend==null){$('pend').textContent='tap MARK START first';return}
+  const a=Math.min(pend,v.currentTime), b=Math.max(pend,v.currentTime);
+  segs.push({label:lbl,start:+a.toFixed(2),end:+b.toFixed(2)});
+  setPend(null); $('pend').textContent='saved '+lbl+' '+fmt(a)+' \u2192 '+fmt(b);
+  drawSegs(); save();
+}
 document.onkeydown=e=>{
   if(e.target.tagName=='INPUT')return;
   const k=e.key;
-  if(k==' '){e.preventDefault(); v.paused?v.play():v.pause()}
-  else if(k=='ArrowLeft'){e.preventDefault(); v.currentTime-=e.shiftKey?10:1}
-  else if(k=='ArrowRight'){e.preventDefault(); v.currentTime+=e.shiftKey?10:1}
-  else if(k==','){v.currentTime-=0.1} else if(k=='.'){v.currentTime+=0.1}
-  else if(k=='['){pend=v.currentTime; $('pend').textContent='\u25cf '+lbl+' started at '+fmt(pend)+' \u2014 press ] at the end'}
-  else if(k==']'){ if(pend==null){$('pend').textContent='press [ first';return}
-     const a=Math.min(pend,v.currentTime), b=Math.max(pend,v.currentTime);
-     segs.push({label:lbl,start:+a.toFixed(2),end:+b.toFixed(2)}); pend=null;
-     $('pend').textContent='saved '+lbl+' '+fmt(a)+' \u2192 '+fmt(b); drawSegs(); save()}
-  else if(k=='Escape'){pend=null;$('pend').textContent='cancelled'}
+  if(k==' '){e.preventDefault(); toggle()}
+  else if(k=='ArrowLeft'){e.preventDefault(); seek(e.shiftKey?-10:-1)}
+  else if(k=='ArrowRight'){e.preventDefault(); seek(e.shiftKey?10:1)}
+  else if(k==','){seek(-0.1)} else if(k=='.'){seek(0.1)}
+  else if(k=='['){markStart()} else if(k==']'){markEnd()}
+  else if(k=='Escape'){setPend(null)}
   else if(k>='1'&&k<='6'){const i=+k-1; if(i<LABELS.length){pick(LABELS[i])}}
   else if(k=='n'&&cur<VIDS.length-1){load(cur+1)}
   else if(k=='p'&&cur>0){load(cur-1)}
 };
 v.ontimeupdate=()=>$('t').textContent=v.currentTime.toFixed(2);
+v.onplay=()=>$('bPlay').innerHTML='&#10073;&#10073;';
+v.onpause=()=>$('bPlay').innerHTML='&#9654;';
 window.onbeforeunload=save; boot();
 </script>"""
 
