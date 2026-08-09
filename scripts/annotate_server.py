@@ -96,21 +96,29 @@ HTML = """<!doctype html><meta charset=utf-8><title>segment annotator</title>
  .seg b{color:#7ec87e;font-weight:600}
  .x{color:#c66;cursor:pointer;padding:0 4px}
  kbd{background:#333;border-radius:3px;padding:1px 5px;font-size:11px}
- #pend{color:#e8c07d} #lbl{color:#7ec87e;font-weight:600}
+ #pend{color:#e8c07d;font-weight:600}
  #help{padding:8px 12px;color:#777;font-size:11px;border-top:1px solid #333}
+ #labels{padding:8px 12px;background:#181818;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+ .lb{background:#2a2a2a;border:1px solid #3a3a3a;color:#bbb;border-radius:4px;padding:5px 10px;
+     cursor:pointer;font-size:12px;user-select:none}
+ .lb:hover{background:#333}
+ .lb.on{background:#2d5a2d;border-color:#4a8a4a;color:#eaffea;font-weight:600}
+ .lb .k{display:inline-block;background:#111;border-radius:3px;padding:0 4px;margin-right:5px;
+        font-size:10px;color:#888}
+ .lb.on .k{color:#cfc}
 </style>
 <div id=main>
   <video id=v controls preload=auto></video>
+  <div id=labels><span style="color:#777;font-size:11px">MARK AS:</span></div>
   <div id=bar>
     <span>t=<b id=t>0.00</b></span>
-    <span>label: <span id=lbl>creampie</span></span>
-    <span id=pend></span>
+    <span id=pend>press [ to start a segment</span>
     <span id=status style="margin-left:auto;color:#777"></span>
   </div>
   <div id=help>
     <kbd>space</kbd> play/pause &nbsp; <kbd>&larr;/&rarr;</kbd> 1s &nbsp; <kbd>shift+&larr;/&rarr;</kbd> 10s &nbsp;
     <kbd>,</kbd>/<kbd>.</kbd> frame &nbsp; <kbd>[</kbd> start &nbsp; <kbd>]</kbd> end+save &nbsp;
-    <kbd>1-6</kbd> label &nbsp; <kbd>n</kbd>/<kbd>p</kbd> next/prev video &nbsp; <kbd>esc</kbd> cancel
+    <kbd>1-6</kbd> pick label (or click above) &nbsp; <kbd>n</kbd>/<kbd>p</kbd> next/prev video &nbsp; <kbd>esc</kbd> cancel
   </div>
 </div>
 <div id=side><h3>videos</h3><div id=vids></div><h3>segments</h3><div id=segs></div></div>
@@ -119,7 +127,13 @@ const LABELS=%LABELS%; let VIDS=[], cur=-1, segs=[], pend=null, lbl=LABELS[0];
 const v=document.getElementById('v');
 const $=(i)=>document.getElementById(i);
 function fmt(s){const m=Math.floor(s/60),x=(s%60).toFixed(2).padStart(5,'0');return m+':'+x}
-async function boot(){VIDS=await (await fetch('/api/videos')).json();drawVids();if(VIDS.length)load(0)}
+async function boot(){drawLabels();VIDS=await (await fetch('/api/videos')).json();drawVids();if(VIDS.length)load(0)}
+function drawLabels(){
+  const el=document.getElementById('labels');
+  el.innerHTML='<span style="color:#777;font-size:11px">MARK AS:</span>'+LABELS.map((L,i)=>
+    `<span class="lb${L==lbl?' on':''}" onclick="pick('${L}')"><span class=k>${i+1}</span>${L}</span>`).join('');
+}
+function pick(L){lbl=L;drawLabels()}
 function drawVids(){$('vids').innerHTML=VIDS.map((x,i)=>
   `<div class="vid${i==cur?' on':''}" onclick="load(${i})">${x.name}<div class=n>${x.nseg||0} segments</div></div>`).join('')}
 async function load(i){
@@ -148,13 +162,13 @@ document.onkeydown=e=>{
   else if(k=='ArrowLeft'){e.preventDefault(); v.currentTime-=e.shiftKey?10:1}
   else if(k=='ArrowRight'){e.preventDefault(); v.currentTime+=e.shiftKey?10:1}
   else if(k==','){v.currentTime-=0.1} else if(k=='.'){v.currentTime+=0.1}
-  else if(k=='['){pend=v.currentTime; $('pend').textContent='start '+fmt(pend)}
+  else if(k=='['){pend=v.currentTime; $('pend').textContent='\u25cf '+lbl+' started at '+fmt(pend)+' \u2014 press ] at the end'}
   else if(k==']'){ if(pend==null){$('pend').textContent='press [ first';return}
      const a=Math.min(pend,v.currentTime), b=Math.max(pend,v.currentTime);
      segs.push({label:lbl,start:+a.toFixed(2),end:+b.toFixed(2)}); pend=null;
-     $('pend').textContent=''; drawSegs(); save()}
-  else if(k=='Escape'){pend=null;$('pend').textContent=''}
-  else if(k>='1'&&k<='6'){const i=+k-1; if(i<LABELS.length){lbl=LABELS[i];$('lbl').textContent=lbl}}
+     $('pend').textContent='saved '+lbl+' '+fmt(a)+' \u2192 '+fmt(b); drawSegs(); save()}
+  else if(k=='Escape'){pend=null;$('pend').textContent='cancelled'}
+  else if(k>='1'&&k<='6'){const i=+k-1; if(i<LABELS.length){pick(LABELS[i])}}
   else if(k=='n'&&cur<VIDS.length-1){load(cur+1)}
   else if(k=='p'&&cur>0){load(cur-1)}
 };
