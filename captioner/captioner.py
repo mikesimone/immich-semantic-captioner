@@ -99,6 +99,10 @@ DENSE_SAMPLING_ALBUM_KEYWORDS = os.environ.get("DENSE_SAMPLING_ALBUM_KEYWORDS", 
 DENSE_INTERVAL_SECONDS = float(os.environ.get("DENSE_INTERVAL_SECONDS", "2"))
 DENSE_MAX_VIDEO_FRAMES = int(os.environ.get("DENSE_MAX_VIDEO_FRAMES", "120"))
 
+# How far the container-declared duration may differ from the frame-count-derived one before
+# the container is treated as wrong. 5% absorbs ordinary rounding and VFR jitter.
+DURATION_MISMATCH_TOLERANCE = float(os.environ.get("DURATION_MISMATCH_TOLERANCE", "0.05"))
+
 # Retained for the cleanup/reset scripts only. The captioner itself no longer files anything
 # into Single Creampie -- creampie counts are reported in the caption and the human sorts.
 SINGLE_CREAMPIE_ALBUM_ID = os.environ.get("SINGLE_CREAMPIE_ALBUM_ID", "3a22144e-143c-4f43-a508-8b3f7fadbcb5")
@@ -832,15 +836,62 @@ def immich_download_original(asset_id: str, dest_path: str) -> None:
                     f.write(chunk)
 
 def probe_duration_seconds(video_path: str) -> float:
+    """Real playable duration, cross-checked against the video stream's frame count.
+
+    Some files declare a duration in their MP4 container header that is far shorter than the
+    actual content, and ffprobe reports the header value (as does Immich, which ingests it).
+    Confirmed case: a compilation declaring 409.34s that really decodes to 1268.30s -- 38,012
+    frames at 29.97fps. Every sample timestamp is derived from this number, so believing the
+    header meant only ever looking at the first 6:49 of a 21:08 video and never seeing two
+    thirds of it.
+
+    nb_frames / r_frame_rate is metadata too, but it comes from the stream rather than the
+    container and disagrees in exactly the cases that matter. When the two disagree by more
+    than DURATION_MISMATCH_TOLERANCE, trust whichever is longer -- under-sampling is the
+    failure mode we're fixing, and over-estimating merely wastes a few ffmpeg seeks past the
+    end, which return no frame and are dropped.
+
+    Deliberately avoids a full decode: that is accurate but takes ~5s per file even at 170x.
+    """
     result = subprocess.run(
-        [FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        [FFPROBE_BIN, "-v", "error",
+         "-select_streams", "v:0",
+         "-show_entries", "format=duration",
+         "-show_entries", "stream=nb_frames,r_frame_rate",
+         "-of", "json", video_path],
         capture_output=True, text=True, timeout=30,
     )
     try:
-        return float(result.stdout.strip())
+        data = json.loads(result.stdout)
     except (ValueError, TypeError):
         return 0.0
+
+    try:
+        container = float((data.get("format") or {}).get("duration"))
+    except (TypeError, ValueError):
+        container = 0.0
+
+    streams = data.get("streams") or []
+    frame_based = 0.0
+    if streams:
+        st = streams[0]
+        try:
+            num, den = (st.get("r_frame_rate") or "0/0").split("/")
+            fps = float(num) / float(den) if float(den) else 0.0
+            nb = float(st.get("nb_frames") or 0)
+            if fps > 0 and nb > 0:
+                frame_based = nb / fps
+        except (TypeError, ValueError, ZeroDivisionError):
+            frame_based = 0.0
+
+    if container > 0 and frame_based > 0:
+        longer, shorter = max(container, frame_based), min(container, frame_based)
+        if shorter > 0 and (longer - shorter) / shorter > DURATION_MISMATCH_TOLERANCE:
+            print(f"[duration] {os.path.basename(video_path)}: container says "
+                  f"{container:.1f}s but {frame_based:.1f}s of frames -- using "
+                  f"{longer:.1f}s", flush=True)
+            return longer
+    return container or frame_based or 0.0
 
 def compute_video_timestamps(duration: float) -> List[float]:
     if duration <= 0:
