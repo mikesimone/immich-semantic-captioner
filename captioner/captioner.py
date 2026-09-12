@@ -177,6 +177,12 @@ IDENTITY_NOUN_HINTS = os.environ.get(
     "Lydia=woman,girl,person;Me=man,guy,person;Meagan=woman,girl,person",
 )
 IDENTITY_ENSURE_MODE = os.environ.get("IDENTITY_ENSURE_MODE", "prefix").strip().lower()
+# Comma-separated album-name substrings where album membership alone settles the identity,
+# so the "no person in this caption means it was misfiled" cleanup never fires -- see
+# is_identity_authoritative_album().
+IDENTITY_AUTHORITATIVE_ALBUM_KEYWORDS = os.environ.get(
+    "IDENTITY_AUTHORITATIVE_ALBUM_KEYWORDS", "Lydia Dog"
+)
 
 def _parse_kv_map(spec: str, item_sep: str = ";") -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -211,6 +217,45 @@ _IDENTITY_ALBUM_REGEXES: Dict[str, re.Pattern] = {
     album_kw: re.compile(rf"\b{re.escape(album_kw)}\b", re.IGNORECASE)
     for album_kw in _IDENTITY_MAP.keys()
 }
+
+# Second identity source: Immich's own People (face-recognition) tags, independent of the
+# album-based system above -- covers ordinary photos (friends, coworkers) that never go near
+# a named album. PEOPLE_NAME_OVERRIDES renames raw Immich Person names that shouldn't be
+# injected verbatim (e.g. the owner's self-tag is literally named "Me" in the People UI, same
+# as the "Me" album-filing shorthand, but should read as "Mike" in generated prose).
+PEOPLE_NAME_OVERRIDES = os.environ.get("PEOPLE_NAME_OVERRIDES", "Me=Mike")
+_PEOPLE_NAME_OVERRIDES = _parse_kv_map(PEOPLE_NAME_OVERRIDES)
+INCLUDE_HIDDEN_PEOPLE = os.environ.get("INCLUDE_HIDDEN_PEOPLE", "0") == "1"
+
+def canonical_people_name(raw_name: str) -> str:
+    return _PEOPLE_NAME_OVERRIDES.get(raw_name, raw_name)
+
+def get_asset_people_names(asset_id: str) -> List[str]:
+    """Fetch named Immich People tagged on this asset (independent of album membership).
+    GET /api/assets/{id} includes a "people" array with name/isHidden per tagged face --
+    verified empirically to be populated there even though /api/search/metadata's own
+    "people" field is not."""
+    try:
+        r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}", headers=immich_headers(), timeout=30)
+        r.raise_for_status()
+        people = r.json().get("people") or []
+        out: List[str] = []
+        seen = set()
+        for p in people:
+            name = (p.get("name") or "").strip()
+            if not name:
+                continue
+            if p.get("isHidden") and not INCLUDE_HIDDEN_PEOPLE:
+                continue
+            cname = canonical_people_name(name)
+            key = cname.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(cname)
+        return out
+    except Exception as e:
+        print(f"[api] Failed to fetch people for {asset_id}: {e}", flush=True)
+        return []
 
 _WS_REGEX = re.compile(r"\s+")
 
@@ -344,25 +389,117 @@ def clean_caption(raw: str) -> str:
     return out[:MAX_CAPTION_CHARS]
 
 # ----------------------------
+# Generation info (local render pipeline metadata riding in EXIF ImageDescription)
+# ----------------------------
+# Images from the local generation pipeline carry their generation parameters -- checkpoint,
+# LoRAs and strengths, seed, sampler, the raw positive prompt -- as a JSON blob in EXIF
+# ImageDescription. Immich copies that field verbatim into asset_exif.description, which is
+# the SAME field this captioner writes captions to, so a naive caption write destroys the
+# only record of how the image was made. That record is not reliably recoverable from the
+# file either: the pipeline's own PNG/JPEG uploads keep it, but anything that arrives via
+# Signal has had its embedded metadata stripped in transport.
+#
+# So a description is treated as two slots joined by GEN_INFO_SEPARATOR: prose caption
+# first (that's what semantic search matches on), generation JSON last, byte-for-byte
+# unchanged. Assets whose description holds nothing BUT generation JSON still count as
+# uncaptioned -- see description_is_captionable() -- which is what finally gets the
+# pipeline's own uploads captioned instead of skipped forever by the "non-empty description
+# means already captioned" rule they used to trip.
+GEN_INFO_SEPARATOR = "\n\n--- generation info ---\n"
+
+# Keys that mark a JSON blob as OUR generation metadata rather than some unrelated JSON a
+# camera or another tool happened to leave in ImageDescription. Requiring a real key hit
+# (rather than just "it parses as JSON") keeps a stray payload from being silently retained
+# as if it were generation info -- and, more importantly, keeps it from being treated as an
+# uncaptioned asset and re-queued on every single pass.
+_GEN_INFO_KEYS = frozenset({
+    "checkpoint", "lora", "loras", "lora_path", "character_lora",
+    "seed", "sampler", "scheduler", "steps", "cfg", "prompt", "class_type",
+})
+
+def parse_generation_info(text: str) -> Optional[str]:
+    """Return the generation-info JSON when `text` is exactly that and nothing else."""
+    if not text:
+        return None
+    s = text.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict) or not obj:
+        return None
+    if _GEN_INFO_KEYS & {str(k) for k in obj}:
+        return s
+    # ComfyUI full-workflow dumps are keyed by node id ("1", "17", ...) with the real
+    # markers one level down, so check the values before giving up.
+    for v in obj.values():
+        if isinstance(v, dict) and _GEN_INFO_KEYS & {str(k) for k in v}:
+            return s
+        if isinstance(v, dict) and isinstance(v.get("inputs"), dict):
+            if _GEN_INFO_KEYS & {str(k) for k in v["inputs"]}:
+                return s
+    return None
+
+def split_description(desc: Optional[str]) -> Tuple[str, Optional[str]]:
+    """Split a stored description into its (caption, generation_info) slots."""
+    if not desc:
+        return "", None
+    if GEN_INFO_SEPARATOR in desc:
+        caption, _, gen = desc.partition(GEN_INFO_SEPARATOR)
+        return caption.strip(), (gen.strip() or None)
+    gen = parse_generation_info(desc)
+    if gen is not None:
+        return "", gen
+    return desc.strip(), None
+
+def compose_description(caption: str, gen_info: Optional[str]) -> str:
+    """Join a caption back together with the generation info it must not lose."""
+    if not gen_info:
+        return caption
+    if not caption:
+        return gen_info
+    return f"{caption}{GEN_INFO_SEPARATOR}{gen_info}"
+
+def description_is_captionable(desc: Optional[str]) -> bool:
+    """True when an asset still needs a caption: either no description at all, or one that
+    holds nothing but generation info."""
+    caption, _ = split_description(desc)
+    return not caption
+
+# ----------------------------
 # Identity overrides
 # ----------------------------
+# One album title can match several identity tokens when one token is a longer form of
+# another ("300.000.006 - Lydia Dog" matches both "Lydia Dog" and "Lydia"), which would
+# otherwise inject two names into the same caption. The longer token is the deliberate, more
+# specific filing -- that album is Lydia stylized as a dog, not an ordinary Lydia photo -- so
+# a match whose token sits inside a longer matched token is dropped. Two unrelated names
+# co-occurring in one title ("Lydia and Meagan") are unaffected: neither contains the other.
+def _identities_for_album(album: str) -> List[str]:
+    matched_kws = [kw for kw, rx in _IDENTITY_ALBUM_REGEXES.items() if rx.search(album)]
+    return [
+        _IDENTITY_MAP[kw]
+        for kw in matched_kws
+        if _IDENTITY_MAP.get(kw)
+        and not any(
+            len(other) > len(kw) and kw.lower() in other.lower()
+            for other in matched_kws
+        )
+    ]
+
 def extract_identities_from_albums(albums: List[str]) -> List[str]:
-    found: List[str] = []
+    seen = set()
+    out: List[str] = []
     for album in albums or []:
         if not album:
             continue
-        for album_kw, rx in _IDENTITY_ALBUM_REGEXES.items():
-            if rx.search(album):
-                canonical = _IDENTITY_MAP.get(album_kw)
-                if canonical:
-                    found.append(canonical)
-    seen = set()
-    out: List[str] = []
-    for name in found:
-        k = name.lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(name)
+        for name in _identities_for_album(album):
+            k = name.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(name)
     return out
 
 def find_albums_matching_identity(albums: List[str], identity_name: str) -> List[str]:
@@ -370,9 +507,8 @@ def find_albums_matching_identity(albums: List[str], identity_name: str) -> List
     for album in albums or []:
         if not album:
             continue
-        for album_kw, rx in _IDENTITY_ALBUM_REGEXES.items():
-            if _IDENTITY_MAP.get(album_kw) == identity_name and rx.search(album):
-                matches.append(album)
+        if identity_name in _identities_for_album(album):
+            matches.append(album)
     return matches
 
 # If a caption doesn't reference a person at all (no pronoun, no generic person noun),
@@ -385,6 +521,66 @@ _PERSON_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Generic person words are only half the vocabulary. The configured noun hints are, by
+# definition, the words that stand in for a given identity, and plenty of them fall outside
+# _PERSON_WORD_RE: explicit slang in the human albums, and animal nouns for an identity that
+# is deliberately depicted as one ("Lydia Dog" captions read "a dog ...", with no person word
+# anywhere). Counting a hint as a reference is what keeps those albums from being read as
+# "nobody is depicted here" and then auto-emptied by the misfile cleanup.
+def _caption_references_someone(caption: str, identities: List[str]) -> bool:
+    if _PERSON_WORD_RE.search(caption):
+        return True
+    for name in identities:
+        hints = _IDENTITY_HINTS.get(name) or _IDENTITY_HINTS.get(name.split()[0]) or []
+        for noun in hints:
+            if re.search(rf"\b{re.escape(noun)}\b", caption, re.IGNORECASE):
+                return True
+    return False
+
+def is_identity_authoritative_album(albums: List[str]) -> bool:
+    """Albums where filing IS the identity claim, overriding the misfile heuristic.
+
+    The misfile check below exists for photo albums, where a caption with no person in it
+    means the asset was filed wrong. That reasoning does not hold for a wholly generated
+    character album: every asset in "300.000.006 - Lydia Dog" is her by construction -- the
+    album is the render output, not a pile of photos someone sorted -- so a caption the
+    heuristic fails to find a person in is a caption-wording problem, not evidence the
+    asset does not belong. Treating it as a misfile there would drop the name AND pull the
+    asset out of the album, which is precisely backwards.
+    """
+    keywords = [k.strip().lower() for k in IDENTITY_AUTHORITATIVE_ALBUM_KEYWORDS.split(",")
+                if k.strip()]
+    if not keywords:
+        return False
+    return any(kw in (album or "").lower() for album in (albums or []) for kw in keywords)
+
+def collapse_name_redundancy(caption: str, identities: List[str]) -> str:
+    """Tidy up the two ways the noun substitution ends up saying a name twice.
+
+    The prompt tells the model to use the name and it usually does -- then describes the
+    subject with a generic noun phrase anyway, and substituting that phrase for the name
+    leaves the name doubled. Two shapes turn up in practice:
+
+      "LydiaDog, a dog, running forward"        -> "LydiaDog, LydiaDog, running forward"
+      "an anthropomorphic dog character named LydiaDog"
+                                                -> "LydiaDog character named LydiaDog"
+
+    Both collapse to a single mention. Only adjacent repeats are touched -- a caption that
+    legitimately names the person again in a later sentence is left alone.
+    """
+    out = caption
+    for name in identities:
+        esc = re.escape(name)
+        # "NAME, NAME" / "NAME NAME" -- separated by nothing but punctuation and space.
+        out = re.sub(rf"\b{esc}\b(?:\s*[,;:]?\s+{esc}\b)+", name, out, flags=re.IGNORECASE)
+        # "NAME character named NAME" -- keep the intervening noun, drop the restatement.
+        out = re.sub(rf"\b{esc}\b(\s+[a-z]+)?\s+named\s+{esc}\b",
+                     lambda m: name + (m.group(1) or ""), out, flags=re.IGNORECASE)
+        # Re-run the plain collapse: dropping the "named NAME" tail can leave the first
+        # shape behind ("NAME, NAME character").
+        out = re.sub(rf"\b{esc}\b(?:\s*[,;:]?\s+{esc}\b)+", name, out, flags=re.IGNORECASE)
+    return out
+
 def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List[str], List[str]]:
     """Returns (updated_caption, implied_tags, misfiled_identities)."""
     if not caption:
@@ -393,7 +589,8 @@ def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List
     if not identities:
         return caption, [], []
 
-    if not _PERSON_WORD_RE.search(caption):
+    if not _caption_references_someone(caption, identities) \
+            and not is_identity_authoritative_album(albums):
         # Nobody appears to be depicted at all -- don't force any identity name into the
         # caption. Flag every expected identity so the caller can clean up the misfile.
         return caption, [], identities
@@ -403,12 +600,17 @@ def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List
         nouns = _IDENTITY_HINTS.get(name) or _IDENTITY_HINTS.get(name.split()[0])
         if nouns:
             noun_alt = "|".join(re.escape(n) for n in nouns)
+            # The trailing group absorbs a SECOND hint noun when the phrase stacks two of
+            # them ("an anthropomorphic dog girl"). Without it the substitution consumes
+            # only up to the first noun and leaves the second stranded on the name --
+            # "LydiaDog girl with pink hair" instead of "LydiaDog with pink hair".
             out = re.sub(
-                rf"\b(a|the)\s+([a-z]+\s+)?({noun_alt})\b",
+                rf"\b(a|an|the)\s+([a-z]+\s+)?({noun_alt})(?:\s+(?:{noun_alt}))?\b",
                 name,
                 out,
                 flags=re.IGNORECASE,
             )
+    out = collapse_name_redundancy(out, identities)
     for name in identities:
         if not re.search(rf"\b{re.escape(name)}\b", out, flags=re.IGNORECASE):
             if IDENTITY_ENSURE_MODE == "suffix":
@@ -1033,6 +1235,93 @@ def is_anthro_album(albums: List[str]) -> bool:
 def is_nonhuman_album(albums: List[str]) -> bool:
     return is_anthro_album(albums) or is_feral_album(albums) or is_furry_album(albums)
 
+# Lactation/Hucow don't have dedicated album-name keyword functions elsewhere in this file
+# (they're only referenced by ALBUM_ID for auto-filing), so check for their name keywords
+# directly here.
+_ADULT_ALBUM_KEYWORD_RE = re.compile(r"\blactation\b|\bhucow\b", re.IGNORECASE)
+
+# This user's whole library follows a numbered top-level convention: 000-090 is ordinary life
+# (pets, family, memes, travel, work, games) and 100-500 is entirely adult content (identity
+# porn albums, creampie categories, furry/hucow, Camspy, Cartoon Porn, Hotwife Captions, LV
+# Hookers, etc. -- see the full album listing). This is a far more complete signal than
+# keyword-matching individual album names one at a time, which misses whole categories
+# (Camspy, Cartoon Porn, Internet Titties) that were confirmed, via a dry run of
+# strip_false_nudity_leaks, to contain real nudity descriptions the keyword-only version
+# wrongly stripped. A nested album like "002.003.004 - GSX FY27" still correctly falls
+# outside the range (leading "002" < 100) despite superficially resembling the porn-numbered
+# branches.
+_ADULT_NUMERIC_PREFIX_RE = re.compile(r"^(\d{3})\.")
+
+def _has_adult_numeric_prefix(albums: List[str]) -> bool:
+    for album in albums or []:
+        m = _ADULT_NUMERIC_PREFIX_RE.match((album or "").strip())
+        if m and int(m.group(1)) >= 100:
+            return True
+    return False
+
+def is_adult_album(albums: List[str]) -> bool:
+    return (
+        _has_adult_numeric_prefix(albums)
+        or bool(extract_identities_from_albums(albums))
+        or is_multiple_creampie_album(albums)
+        or is_single_creampie_album(albums)
+        or is_masturbation_album(albums)
+        or is_nonhuman_album(albums)
+        or any(_ADULT_ALBUM_KEYWORD_RE.search(album or "") for album in (albums or []))
+    )
+
+# Sentences JoyCaption leaks into an otherwise non-explicit caption despite the prompt's own
+# "if NO -- do not mention nudity/genitals/fluids at all, in either direction" rule -- both
+# disclaimer-style negations ("no visible cum or sexual activity", "neither man's genitals
+# are visible") and bare positive assertions about genitals/nipples/undress that have no
+# business appearing on a fully-clothed subject ("his nipples are small and light-colored",
+# "his pants are down slightly, exposing his ass"). This is intentionally broader than
+# _JUNK_SENTENCE_RE above (which runs unconditionally on every caption, including genuinely
+# explicit ones) -- it's only ever invoked from strip_false_nudity_leaks(), which gates it to
+# non-adult albums and verifies the caption has no surviving genuine nudity vocabulary first.
+_NUDITY_LEAK_SENTENCE_RE = re.compile(
+    r"\b(?:nipples?|penis|penises|vaginas?|genitals?|genitalia)\b"
+    r"|\bno\b.{0,40}\b(?:nudity|nude|sexual content|sexual activity|explicit content|"
+    r"explicit acts?|genitalia|genitals?|cum)\b"
+    r"|\b(?:nudity|nude|sexual content|explicit content|genitalia|genitals?)\b.{0,30}"
+    r"\b(?:not|isn't|is\s+not|aren't|are\s+not)\b.{0,20}\b(?:present|depicted|shown|"
+    r"visible|apply)\b"
+    r"|\bneither\b.{0,25}\b(?:genitals?|genitalia|nipples?|penis)\b"
+    r"|\b(?:pants|shorts|underwear|boxers)\b.{0,15}\bdown\b"
+    r"|\bexposing\s+(?:his|her|their)\s+(?:ass|bare)\b",
+    re.IGNORECASE,
+)
+
+# The vocabulary the prompt itself requires for a genuinely explicit caption (the "if YES"
+# branch mandates "cock"/"pussy"/"cum"/etc., forbids clinical hedging) -- if any of it
+# survives after stripping leak sentences, this caption is describing real nudity and should
+# be left alone rather than risk deleting legitimate content.
+_EXPLICIT_NUDITY_VOCAB_RE = re.compile(
+    r"\b(?:cock|pussy|tits?|asshole|cum|creampie|fuck(?:ing|ed|s)?|moan(?:ing|ed|s)?|"
+    r"dripping|gaping|nude|naked|topless|blowjob|handjob|masturbat\w*)\b",
+    re.IGNORECASE,
+)
+
+def has_explicit_nudity_vocab(caption: str) -> bool:
+    return bool(_EXPLICIT_NUDITY_VOCAB_RE.search(caption or ""))
+
+def strip_false_nudity_leaks(caption: str, albums: List[str]) -> str:
+    """For assets outside adult-content albums, strip JoyCaption sentences that leak nudity/
+    genital-status commentary despite the prompt's own instruction never to mention it on
+    non-explicit content. See _NUDITY_LEAK_SENTENCE_RE above for what counts."""
+    if not caption or is_adult_album(albums):
+        return caption
+    sentences = _SENTENCE_SPLIT_RE.split(caption)
+    kept = [sent for sent in sentences if not _NUDITY_LEAK_SENTENCE_RE.search(sent)]
+    if len(kept) == len(sentences):
+        return caption
+    candidate = " ".join(kept).strip()
+    if not candidate:
+        return caption
+    if has_explicit_nudity_vocab(candidate):
+        return caption
+    return candidate
+
 def extract_video_frames(video_path: str, dense: bool = False) -> List[Tuple[float, Image.Image]]:
     duration = probe_duration_seconds(video_path)
     timestamps = compute_dense_timestamps(duration) if dense else compute_video_timestamps(duration)
@@ -1305,7 +1594,7 @@ def build_compact_person_prompt() -> str:
 # Asset-identity names for whom we already know exactly who she is from album membership --
 # describing her physically (breast size/race/age) is redundant, so we skip it entirely
 # when she's the only person identified for this asset.
-COMPACT_DESC_SKIP_NAMES = {"Lydia"}
+COMPACT_DESC_SKIP_NAMES = {"Lydia", "LydiaDog"}
 
 _VALID_BREAST_SIZES = {"small", "medium", "large", "huge"}
 _AGE_KEYWORDS = ("young", "middle", "old")
@@ -1749,7 +2038,7 @@ def get_uncaptioned_candidates_api() -> List[Dict]:
                     continue
                 exif = item.get("exifInfo", {})
                 desc = exif.get("description") if exif else None
-                if not desc or desc.strip() == "":
+                if description_is_captionable(desc):
                     candidates.append(item)
                     print(f"[api-candidate] Found uncaptioned: {asset_id}", flush=True)
 
@@ -1772,23 +2061,31 @@ def get_uncaptioned_candidates_api() -> List[Dict]:
 
     return candidates
 
-def get_asset_albums(asset_id: str) -> List[str]:
-    """Fetch album names for an asset via API (needed in API-only mode).
+def refresh_asset_albums(asset_id: str, fallback: List[str]) -> List[str]:
+    """Album membership as of right now, falling back to what the caller already had.
 
-    GET /api/assets/{id} does NOT include album membership on this Immich version
-    (verified empirically -- AssetResponseDto has no "albums" field). The correct
-    endpoint is GET /api/albums?assetId={id}, which returns the list of albums
-    directly (each with an "albumName" field).
+    In DB-direct mode the album list arrives from the prefetch thread's candidate query,
+    which by design runs well ahead of the GPU -- easily long enough for a just-uploaded
+    asset to be queued in the same second it was created, before the uploading client has
+    finished adding it to its album. Captioning that snapshot loses the identity name and,
+    worse, reads as "no album" for every routing rule downstream. Re-reading here costs one
+    localhost round-trip against a job that takes tens of seconds.
+
+    A failed lookup returns the fallback rather than [], since an asset wrongly seen as
+    album-less gets parked or stripped of its identity.
+
+    GET /api/assets/{id} does NOT include album membership on this Immich version (verified
+    empirically -- AssetResponseDto has no "albums" field). GET /api/albums?assetId={id} is
+    the endpoint that works, returning the albums directly, each with an "albumName".
     """
     try:
         url = f"{IMMICH_URL}/api/albums"
         r = requests.get(url, headers=immich_headers(), params={"assetId": asset_id}, timeout=30)
         r.raise_for_status()
-        data = r.json()
-        return [album.get("albumName") for album in data if album.get("albumName")]
+        return [a.get("albumName") for a in r.json() if a.get("albumName")]
     except Exception as e:
-        print(f"[api] Failed to fetch albums for {asset_id}: {e}", flush=True)
-        return []
+        print(f"[api] Album re-read failed for {asset_id}, keeping queued list: {e}", flush=True)
+        return fallback
 
 # ----------------------------
 # Postgres helpers (ONLY used if not USE_API_ONLY)
@@ -1871,7 +2168,18 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
     LEFT JOIN album al ON al.id = aa."albumId"
     WHERE
       cs.asset_id IS NULL
-      AND (ae.description IS NULL OR btrim(ae.description) = '')
+      AND (
+        ae.description IS NULL
+        OR btrim(ae.description) = ''
+        -- A description holding nothing but generation info is still uncaptioned. Matched
+        -- loosely here (any JSON-looking blob) because Postgres can't judge the keys;
+        -- description_is_captionable() makes the real call on the fetched row.
+        -- The LIKE wildcards below are doubled: this statement is executed with a bound
+        -- parameter, so psycopg2 treats a lone percent sign as the start of a placeholder
+        -- and raises IndexError on a literal one. Keep any comment in this string free of
+        -- percent signs for the same reason.
+        OR (btrim(ae.description) LIKE '{{%%' AND btrim(ae.description) LIKE '%%}}')
+      )
     GROUP BY a.id, ae.description, ae.make {', a."type"' if has_type else ''}
     {order_clause}
     LIMIT %s;
@@ -1915,6 +2223,7 @@ def main():
         prefetched_thumbnail: Optional[Image.Image] = None,
         prefetched_thumbnail_error: Optional[Exception] = None,
         exif_make: Optional[str] = None,
+        gen_info: Optional[str] = None,
     ) -> None:
         nonlocal total_done
         try:
@@ -1924,7 +2233,19 @@ def main():
                 print(f"[skip] {asset_id} is VIDEO (skipping)", flush=True)
                 return
 
-            person_names = extract_identities_from_albums(albums)
+            # Re-read album membership as late as possible -- see refresh_asset_albums().
+            albums = refresh_asset_albums(asset_id, albums)
+
+            # Merge both identity sources: album-based (curated, mostly the adult-content
+            # roster) and Immich's own People face-tags (covers ordinary photos that never
+            # go near a named album). Album names take precedence in ordering since that
+            # system predates this one and its captions/prompts were tuned around it.
+            person_names = list(extract_identities_from_albums(albums))
+            seen_names = {n.lower() for n in person_names}
+            for name in get_asset_people_names(asset_id):
+                if name.lower() not in seen_names:
+                    seen_names.add(name.lower())
+                    person_names.append(name)
 
             # Computed for every asset type, not just video -- the auto-filing rules below
             # apply to images too, and non-human content must be excluded from them there
@@ -1958,6 +2279,9 @@ def main():
                 print(f"[skip] {asset_id} produced empty/junk caption (marked skip)", flush=True)
                 return
 
+            if mode != "VIDEO-PORN-COMPACT":
+                caption = strip_false_nudity_leaks(caption, albums)
+
             if mode == "VIDEO-PORN-COMPACT":
                 # The compact field format has no "the woman"/"she" prose to substitute a
                 # name into, and it deliberately omits any person-reference wording when
@@ -1970,7 +2294,9 @@ def main():
                 caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
             caption = " ".join(caption.split()).strip()[:MAX_CAPTION_CHARS]
 
-            ok = immich_update_description(asset_id, caption)
+            # Truncation above applies to the caption alone -- the generation info is
+            # re-attached afterwards so MAX_CAPTION_CHARS can never clip the JSON.
+            ok = immich_update_description(asset_id, compose_description(caption, gen_info))
             if ok:
                 total_done += 1
                 alb = ", ".join(albums[:3]) + ("..." if len(albums) > 3 else "")
@@ -2010,7 +2336,12 @@ def main():
                     # own feral albums are the whole classification. Everything below is
                     # skipped for it -- anthro, by contrast, is expected to live in Furry Stuff.
                     if not feral:
-                        if _FURRY_TRIGGER_RE.search(caption):
+                        # Membership in an identity album is a deliberate human filing
+                        # decision, so don't second-guess it off a caption keyword. Lydia
+                        # stylized as a dog captions as "anthropomorphic dog", which would
+                        # otherwise sweep that entire album into Furry Stuff and archive it
+                        # out of the timeline.
+                        if _FURRY_TRIGGER_RE.search(caption) and not extract_identities_from_albums(albums):
                             immich_add_to_album(asset_id, FURRY_ALBUM_ID)
                             immich_archive(asset_id)
 
@@ -2061,10 +2392,13 @@ def main():
             for row in candidates:
                 asset_id = row.get("id")
                 asset_type = row.get("type", "UNKNOWN").upper()  # API may not have type; fallback
-                albums = get_asset_albums(asset_id)  # Fetch separately
+                # Albums are read inside process_candidate (refresh_asset_albums), as late
+                # as possible, so there's nothing to fetch here.
+                exif_info = row.get("exifInfo") or {}
                 process_candidate(
-                    asset_id, asset_type, albums,
-                    exif_make=(row.get("exifInfo") or {}).get("make"),
+                    asset_id, asset_type, [],
+                    exif_make=exif_info.get("make"),
+                    gen_info=split_description(exif_info.get("description"))[1],
                 )
 
             print(f"[progress] total updated this run: {total_done}", flush=True)
@@ -2103,6 +2437,12 @@ def main():
 
                 for row in rows:
                     asset_id = str(row["id"])
+                    # pg_fetch_candidates() matches any JSON-looking description so Postgres
+                    # doesn't have to reason about generation-info keys; reject the ones that
+                    # turned out to be an unrelated blob (a real, already-written caption)
+                    # before they cost a GPU pass.
+                    if not description_is_captionable(row.get("description")):
+                        continue
                     with in_flight_lock:
                         if asset_id in in_flight_ids:
                             continue
@@ -2118,7 +2458,8 @@ def main():
                             thumb_err = e
 
                     prefetch_q.put(("row", (asset_id, asset_type, albums, thumb, thumb_err,
-                                            row.get("exif_make"))))
+                                            row.get("exif_make"),
+                                            split_description(row.get("description"))[1])))
         finally:
             worker_conn.close()
 
@@ -2137,10 +2478,11 @@ def main():
             print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
             continue
 
-        asset_id, asset_type, albums, thumb, thumb_err, exif_make = payload
+        asset_id, asset_type, albums, thumb, thumb_err, exif_make, gen_info = payload
         try:
             process_candidate(asset_id, asset_type, albums, prefetched_thumbnail=thumb,
-                              prefetched_thumbnail_error=thumb_err, exif_make=exif_make)
+                              prefetched_thumbnail_error=thumb_err, exif_make=exif_make,
+                              gen_info=gen_info)
         finally:
             with in_flight_lock:
                 in_flight_ids.discard(asset_id)
