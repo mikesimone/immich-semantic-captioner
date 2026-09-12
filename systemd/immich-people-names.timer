@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly run of immich-people-names.service
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=Reconcile Immich caption descriptions against named People tags
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'docker exec -i immich_captioner python3 - < /opt/captioner/immich-semantic-captioner/scripts/apply_people_names.py'
