@@ -183,6 +183,15 @@ IDENTITY_ENSURE_MODE = os.environ.get("IDENTITY_ENSURE_MODE", "prefix").strip().
 IDENTITY_AUTHORITATIVE_ALBUM_KEYWORDS = os.environ.get(
     "IDENTITY_AUTHORITATIVE_ALBUM_KEYWORDS", "Lydia Dog"
 )
+# Numeric-prefix identity rule, for a whole numbered branch that depicts one person.
+# IDENTITY_ALBUM_MAP can only match a name written inside the album title, which breaks down
+# as soon as sibling albums are named after WHAT they show rather than WHO -- "300.006.001 -
+# Doggystyle" has no name in it to match. A prefix entry says every album under that branch
+# is that person by construction, the same shape of rule as MULTI_CREAMPIE_PREFIX. It also
+# implies authoritative: a branch that only ever holds one character's renders has no
+# "maybe it was misfiled" case to protect against.
+# Format: IDENTITY_ALBUM_PREFIX_MAP="300.006.=LydiaDog"
+IDENTITY_ALBUM_PREFIX_MAP = os.environ.get("IDENTITY_ALBUM_PREFIX_MAP", "300.006.=LydiaDog")
 
 def _parse_kv_map(spec: str, item_sep: str = ";") -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -211,6 +220,13 @@ def _parse_noun_hints(spec: str, item_sep: str = ";") -> Dict[str, List[str]]:
     return out
 
 _IDENTITY_MAP = _parse_kv_map(IDENTITY_ALBUM_MAP)
+_IDENTITY_PREFIX_MAP = _parse_kv_map(IDENTITY_ALBUM_PREFIX_MAP)
+
+def _identity_prefix_matches(album: str) -> List[str]:
+    """Identities claimed by an album's numbered prefix, independent of its wording."""
+    a = (album or "").strip()
+    return [name for pfx, name in _IDENTITY_PREFIX_MAP.items() if a.startswith(pfx)]
+
 _IDENTITY_HINTS = _parse_noun_hints(IDENTITY_NOUN_HINTS)
 
 _IDENTITY_ALBUM_REGEXES: Dict[str, re.Pattern] = {
@@ -479,7 +495,7 @@ def description_is_captionable(desc: Optional[str]) -> bool:
 # co-occurring in one title ("Lydia and Meagan") are unaffected: neither contains the other.
 def _identities_for_album(album: str) -> List[str]:
     matched_kws = [kw for kw, rx in _IDENTITY_ALBUM_REGEXES.items() if rx.search(album)]
-    return [
+    out = [
         _IDENTITY_MAP[kw]
         for kw in matched_kws
         if _IDENTITY_MAP.get(kw)
@@ -488,6 +504,13 @@ def _identities_for_album(album: str) -> List[str]:
             for other in matched_kws
         )
     ]
+    # A numbered-branch prefix claims its identity regardless of how the album is worded,
+    # so these are added on top of any name actually spelled out in the title. Every caller
+    # that resolves album identities goes through here, so they all pick this up.
+    for name in _identity_prefix_matches(album):
+        if name not in out:
+            out.append(name)
+    return out
 
 def extract_identities_from_albums(albums: List[str]) -> List[str]:
     seen = set()
@@ -548,6 +571,10 @@ def is_identity_authoritative_album(albums: List[str]) -> bool:
     asset does not belong. Treating it as a misfile there would drop the name AND pull the
     asset out of the album, which is precisely backwards.
     """
+    # A prefix-mapped branch is authoritative by construction -- it only ever holds one
+    # character's renders -- so it needs no keyword spelled out in the title to qualify.
+    if any(_identity_prefix_matches(album) for album in (albums or [])):
+        return True
     keywords = [k.strip().lower() for k in IDENTITY_AUTHORITATIVE_ALBUM_KEYWORDS.split(",")
                 if k.strip()]
     if not keywords:
@@ -2375,6 +2402,23 @@ def main():
                 pg_mark_skip(conn, asset_id, f"HTTP_ERROR_{status}")
             print(f"[skip] {asset_id}: HTTP {status} fetching asset (marked skip)", flush=True)
             time.sleep(0.2)
+
+        except RuntimeError as e:
+            # caption_video raises this specific message for a video with no
+            # decodable frames (e.g. a truncated/failed upload). Unlike other
+            # RuntimeErrors it's not transient -- retrying never helps -- but
+            # without this it retried forever with no backoff (asset
+            # 7e610ef6-7054-426f-a5af-f69c439d0d7d: 44k+ retries, ~51/min,
+            # 13.5h straight, GPU pinned at 12.5GB idle -- see 2026-09-14
+            # weekly log review).
+            if str(e) == "no frames extracted":
+                if not USE_API_ONLY:
+                    pg_mark_skip(conn, asset_id, "NO_FRAMES_EXTRACTED")
+                print(f"[skip] {asset_id}: no frames extracted (marked skip)", flush=True)
+                time.sleep(0.2)
+            else:
+                print(f"[error] {asset_id}: {e}", flush=True)
+                time.sleep(1.0)
 
         except Exception as e:
             print(f"[error] {asset_id}: {e}", flush=True)
