@@ -2326,18 +2326,28 @@ ROUTING_PERSON_EXCLUDE = {
 }
 
 # LydiaDog match for anthro stills. Three signals, strongest first: the generation-info JSON
-# naming her LoRA (every render from the local pipeline carries it), Immich's own Person tag,
+# naming her LoRA (every render from the local pipeline carries it; the LoRA has shipped under
+# several filenames, so any mention of "lydia" counts -- only renders carry generation info,
+# so a real photo of Lydia can never hit this), Immich's own Person tag,
 # and a low-threshold face re-detection compared against the faces already tagged as her --
 # the same technique scripts/tag_album_people_faces.py uses, because the stock detector finds
 # a face on only a few percent of these renders.
 LYDIADOG_PERSON_NAME = os.environ.get("LYDIADOG_PERSON_NAME", "Lydia Dog")
 LYDIADOG_GEN_INFO_KEYWORDS = [
     k.strip().lower()
-    for k in os.environ.get("LYDIADOG_GEN_INFO_KEYWORDS", "lydiadog,lydia_dog,lydia-dog").split(",")
+    for k in os.environ.get("LYDIADOG_GEN_INFO_KEYWORDS", "lydia").split(",")
     if k.strip()
 ]
 LYDIADOG_MIN_SIMILARITY = float(os.environ.get("LYDIADOG_MIN_SIMILARITY", "0.70"))
 LYDIADOG_DETECT_MIN_SCORE = float(os.environ.get("LYDIADOG_DETECT_MIN_SCORE", "0.05"))
+# Anything filed under this album number -- by the human or by routing -- gets the LydiaDog
+# Person tag on its main face, so it shows up on her People page.
+LYDIADOG_ALBUM_PREFIX = os.environ.get("LYDIADOG_ALBUM_PREFIX", "300.006.")
+# Face acceptance, same tiers as scripts/tag_album_people_faces.py: a box at or above
+# LYDIADOG_SCORE_CONFIDENT is taken outright; a weaker one needs LYDIADOG_TAG_MIN_SIMILARITY
+# to her already-tagged faces.
+LYDIADOG_SCORE_CONFIDENT = float(os.environ.get("LYDIADOG_SCORE_CONFIDENT", "0.20"))
+LYDIADOG_TAG_MIN_SIMILARITY = float(os.environ.get("LYDIADOG_TAG_MIN_SIMILARITY", "0.60"))
 ML_URL = os.environ.get("ML_URL", "http://immich-machine-learning:3003/predict")
 ML_FACE_MODEL = os.environ.get("ML_FACE_MODEL", "buffalo_l")
 
@@ -2596,7 +2606,9 @@ def _cosine(a: List[float], b: List[float]) -> float:
         return 0.0
     return sum(x * y for x, y in zip(a, b)) / (na * nb)
 
-def _ml_detect_faces(image_bytes: bytes) -> List[dict]:
+def _ml_detect_faces(image_bytes: bytes) -> dict:
+    """Low-threshold face detection via Immich's ML service.
+    Returns {"w", "h", "boxes": [{x1, y1, x2, y2, score, embedding}]}."""
     entries = json.dumps({
         "facial-recognition": {
             "detection": {"modelName": ML_FACE_MODEL, "options": {"minScore": LYDIADOG_DETECT_MIN_SCORE}},
@@ -2607,17 +2619,26 @@ def _ml_detect_faces(image_bytes: bytes) -> List[dict]:
                       files={"image": ("image.jpg", io.BytesIO(image_bytes), "application/octet-stream")},
                       timeout=300)
     r.raise_for_status()
-    out = []
-    for f in r.json().get("facial-recognition") or []:
+    data = r.json()
+    boxes = []
+    for f in data.get("facial-recognition") or []:
         emb = f.get("embedding")
         if isinstance(emb, str):
             try:
                 emb = json.loads(emb)
             except ValueError:
                 emb = None
-        if emb:
-            out.append({"score": float(f.get("score") or 0.0), "embedding": emb})
-    return out
+        b = f.get("boundingBox") or {}
+        boxes.append({"x1": b.get("x1"), "y1": b.get("y1"), "x2": b.get("x2"), "y2": b.get("y2"),
+                      "score": float(f.get("score") or 0.0), "embedding": emb})
+    return {"w": int(data.get("imageWidth") or 0), "h": int(data.get("imageHeight") or 0),
+            "boxes": boxes}
+
+def _lydiadog_reference_embeddings(state: "RoutingState") -> List[List[float]]:
+    if time.time() - float(_lydiadog_refs["at"]) > 3600:
+        _lydiadog_refs["embeddings"] = state.person_face_embeddings(LYDIADOG_PERSON_NAME)
+        _lydiadog_refs["at"] = time.time()
+    return _lydiadog_refs["embeddings"]
 
 def matches_lydiadog(asset_id: str, gen_info: Optional[str], raw_people: List[str],
                      state: "RoutingState") -> bool:
@@ -2627,17 +2648,14 @@ def matches_lydiadog(asset_id: str, gen_info: Optional[str], raw_people: List[st
     if any(n.casefold() == LYDIADOG_PERSON_NAME.casefold() for n in raw_people):
         print(f"[route] {asset_id} LydiaDog by Immich person tag", flush=True)
         return True
-    if time.time() - float(_lydiadog_refs["at"]) > 3600:
-        _lydiadog_refs["embeddings"] = state.person_face_embeddings(LYDIADOG_PERSON_NAME)
-        _lydiadog_refs["at"] = time.time()
-    refs = _lydiadog_refs["embeddings"]
+    refs = _lydiadog_reference_embeddings(state)
     if not refs:
         return False
     try:
         r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}/thumbnail", headers=immich_headers(),
                          params={"size": "preview"}, timeout=120)
         r.raise_for_status()
-        faces = _ml_detect_faces(r.content)
+        faces = [b for b in _ml_detect_faces(r.content)["boxes"] if b.get("embedding")]
     except Exception as e:
         print(f"[route] {asset_id} LydiaDog face check failed: {e}", flush=True)
         return False
@@ -2646,6 +2664,100 @@ def matches_lydiadog(asset_id: str, gen_info: Optional[str], raw_people: List[st
         print(f"[route] {asset_id} LydiaDog by face similarity {best:.2f}", flush=True)
         return True
     return False
+
+_person_id_cache: Dict[str, str] = {}
+
+def immich_person_id(name: str) -> Optional[str]:
+    if name in _person_id_cache:
+        return _person_id_cache[name]
+    r = requests.get(f"{IMMICH_URL}/api/people", headers=immich_headers(),
+                     params={"withHidden": "true"}, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    people = data.get("people", []) if isinstance(data, dict) else data
+    matches = [p for p in people if p.get("name") == name]
+    if len(matches) != 1:
+        print(f"[tag] {len(matches)} Immich people named {name!r} -- can't tag", flush=True)
+        return None
+    _person_id_cache[name] = matches[0]["id"]
+    return _person_id_cache[name]
+
+def _clamp_box(box: dict, w: int, h: int) -> Optional[Dict[str, int]]:
+    try:
+        x1, y1 = max(0.0, float(box["x1"])), max(0.0, float(box["y1"]))
+        x2, y2 = min(float(w), float(box["x2"])), min(float(h), float(box["y2"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    # Specks and edge artefacts: the same 3%-of-the-frame floor the album script uses.
+    if x2 - x1 < max(20, 0.03 * w) or y2 - y1 < max(20, 0.03 * h):
+        return None
+    return {"x": round(x1), "y": round(y1), "width": round(x2 - x1), "height": round(y2 - y1)}
+
+def tag_lydiadog(asset_id: str, state: "RoutingState") -> None:
+    """Give an asset filed under LydiaDog's album the LydiaDog Person tag.
+
+    Immich can only tag a person through a face row, and the stock detector finds a face on
+    only a few percent of her renders. So, in order: keep an existing LydiaDog face; adopt an
+    unnamed face Immich already found; re-detect at a low threshold and take the best box
+    (confident score, or similar enough to her tagged faces); and if nothing qualifies, tag
+    the whole frame, because album membership already says it's her. A face belonging to a
+    different named person is never taken over -- a new LydiaDog face is added beside it."""
+    person_id = immich_person_id(LYDIADOG_PERSON_NAME)
+    if not person_id:
+        return
+    r = requests.get(f"{IMMICH_URL}/api/faces", headers=immich_headers(),
+                     params={"id": asset_id}, timeout=60)
+    r.raise_for_status()
+    faces = r.json() or []
+    if any((f.get("person") or {}).get("id") == person_id for f in faces):
+        return
+    adoptable = [f for f in faces if not (f.get("person") or {}).get("name")]
+    if adoptable:
+        face = max(adoptable, key=lambda f: (
+            max(0, f.get("boundingBoxX2", 0) - f.get("boundingBoxX1", 0))
+            * max(0, f.get("boundingBoxY2", 0) - f.get("boundingBoxY1", 0))))
+        if not DRY_RUN:
+            # The PATH carries the target person and the BODY the face being moved.
+            requests.put(f"{IMMICH_URL}/api/faces/{person_id}",
+                         headers={**immich_headers(), "Content-Type": "application/json"},
+                         data=json.dumps({"id": face["id"]}), timeout=60).raise_for_status()
+        print(f"[tag] {asset_id} LydiaDog: adopted existing face {face['id']}", flush=True)
+        return
+
+    r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}/original", headers=immich_headers(), timeout=180)
+    r.raise_for_status()
+    det = _ml_detect_faces(r.content)
+    w, h = det["w"], det["h"]
+    if not w or not h:
+        print(f"[tag] {asset_id} LydiaDog: ML service returned no image size -- skipped", flush=True)
+        return
+    refs = _lydiadog_reference_embeddings(state)
+    candidates = []
+    for b in det["boxes"]:
+        geom = _clamp_box(b, w, h)
+        if not geom:
+            continue
+        sim = max((_cosine(b["embedding"], ref) for ref in refs), default=None) if b.get("embedding") else None
+        if b["score"] >= LYDIADOG_SCORE_CONFIDENT:
+            tier = 2
+        elif sim is not None and sim >= LYDIADOG_TAG_MIN_SIMILARITY:
+            tier = 1
+        else:
+            continue
+        candidates.append((tier, geom["width"] * geom["height"], geom))
+    if candidates:
+        geom = max(candidates, key=lambda c: (c[0], c[1]))[2]
+        how = "detected face"
+    else:
+        geom = {"x": 0, "y": 0, "width": w, "height": h}
+        how = "whole frame (no face found)"
+    if not DRY_RUN:
+        requests.post(f"{IMMICH_URL}/api/faces",
+                      headers={**immich_headers(), "Content-Type": "application/json"},
+                      data=json.dumps({"personId": person_id, "assetId": asset_id,
+                                       "imageWidth": w, "imageHeight": h, **geom}),
+                      timeout=60).raise_for_status()
+    print(f"[tag] {asset_id} LydiaDog: tagged {how} {geom}", flush=True)
 
 # ---- Person albums (step 2) ----
 def person_albums(raw_people: List[str]) -> List[Tuple[str, str, str]]:
@@ -3132,6 +3244,10 @@ def main():
                         add("cow_anthro")
                     if matches_lydiadog(asset_id, gen_info, raw_people, state):
                         add("lydia_dog")
+                        try:
+                            tag_lydiadog(asset_id, state)
+                        except Exception as e:
+                            print(f"[tag] {asset_id} LydiaDog tagging failed: {e}", flush=True)
                     albums = refresh_asset_albums(asset_id, [])
                     raw, mode = caption_image(thumb, person_names=names_for(albums, people))
                 return finish(raw, mode, "anthro", archive=True)
@@ -3265,9 +3381,13 @@ def main():
             to_single = any(r["album_id"] == single_id for r in adds)
             to_counted = any(n.strip().startswith(MULTI_EVENT_COUNT_ALBUM_PREFIXES) for n in names)
             to_porn = any((album_number(n) or "").startswith("200.") for n in names)
+            to_lydiadog = bool(LYDIADOG_ALBUM_PREFIX) and any(
+                n.strip().startswith(LYDIADOG_ALBUM_PREFIX) for n in names)
             is_video = (adds[0]["type"] or "").upper() == "VIDEO"
             caption, gen = split_description(adds[0]["description"])
             try:
+                if to_lydiadog and not is_video:
+                    tag_lydiadog(asset_id, state)
                 if not caption:
                     # Still waiting for its caption: the normal pass captions it by album
                     # (and counts creampies for Multiple Creampie), so only the archive
