@@ -43,7 +43,10 @@ def load_env():
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
-    return env["IMMICH_URL"].rstrip("/"), env["IMMICH_API_KEY"]
+    # The key now lives in ~/.api-keys (exported by .bashrc); .env is the fallback.
+    url = os.environ.get("IMMICH_URL") or env["IMMICH_URL"]
+    key = os.environ.get("IMMICH_API_KEY") or env["IMMICH_API_KEY"]
+    return url.rstrip("/"), key
 
 
 IMMICH_URL, API_KEY = load_env()
