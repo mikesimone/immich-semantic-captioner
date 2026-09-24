@@ -96,6 +96,55 @@ For each Immich asset with an empty description:
 
 ---
 
+## Upload Routing and Album Moves
+
+When Postgres credentials are available (`PG*`, even with `USE_API_ONLY=true`), the captioner
+also files new uploads and reacts to albums you file things into. Set `ROUTING_ENABLED=0` to
+turn this off.
+
+**New uploads** (in no album, never captioned before) are routed in this order. Each step can
+stop processing; a stopped asset still gets its normal caption so it isn't re-queued.
+
+1. **CamSpy**: EXIF make `Meta` (Ray-Ban Meta) or a filename containing `SpyPhoto` goes to
+   `400.001`, gets the full narrative caption, and is archived.
+2. **Known person**: the asset waits (up to `FACE_WAIT_MAX_SECONDS`) for Immich's face
+   recognition. A named person with an album titled after them (`002.000 - Lydia`, `Me`, ...)
+   gets filed there and captioned with their name, and stays in the timeline. People without an
+   album just get named in the caption. `ROUTING_PERSON_EXCLUDE` (LydiaDog by default) is skipped.
+3. **Anthro**: `300.000.000 - Furry Stuff`. Videos also go to `300.001` (and `300.002` for
+   anthro/anthro sex or `300.004` for human/anthro sex). Stills go to `300.005` for human/anthro sex,
+   `300.000.002` for an anthro cow, and `300.006.000 - Lydia Dog` when the generation info names her
+   LoRA, Immich tags her, or a low-threshold face re-detection matches her tagged faces. Archived.
+4. **Nudity**: without nudity, the regular caption, left in the timeline.
+5. **Porn categories**: solo woman goes to `200.010.000`, plus `200.010.001` if masturbating;
+   cow print or horns go to Hucow; lactation goes to `200.010.002`; glory wall goes to
+   `200.000.006`; tentacles or the Hentaied logo go to `200.000.008` (archive and stop). Videos
+   get the compact porn-ID caption with no creampie count. A studio logo, title card, or filename
+   (Slutwife Jessica/Marion, Puta Locura, Creampie Squad, Gangbang/5 Guy Creampie) files the video
+   into that studio album plus `200.000.000`, runs the CumCounter, and archives it. Otherwise a
+   detected creampie gets the caption `Please Categorize | ...`. It stays in the timeline, and if
+   she's restrained it also goes to `200.002.000 - Bondage Creampie`. Anything else filed into a
+   porn album is archived, unless a still shows cum in or leaking from a vagina.
+
+**Album moves** are detected by snapshotting album membership every `MOVE_POLL_SECONDS`.
+Additions the captioner makes itself, and everything already filed when routing first starts,
+don't count.
+
+- Added to `200.000.000 - Multiple Creampie`: the CumCounter replaces the `Separate Creampies`
+  field and keeps the other fields. The asset is archived.
+- Added to `200.001.000 - Single Creampie`: archived.
+- Added to any `100.000.x` album: the CumCounter runs, and archive state is left alone.
+- A `Please Categorize` caption loses that prefix once the asset is filed anywhere.
+
+Routing albums are found by number (see `_DEFAULT_ROUTING_ALBUM_NUMBERS` in `captioner.py`,
+overridable with `ROUTING_ALBUM_NUMBERS`), so the text after the number can change freely.
+
+State lives in four tables the captioner creates in the Immich database: `captioner_meta`,
+`captioner_routed` (assets already routed, seeded with everything captioned before the first
+run), `captioner_face_wait`, and `captioner_album_member`.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -230,7 +279,9 @@ captioner_skip
 
 Used to track assets that failed processing.
 
-No other schema changes are made.
+Upload routing (see above) adds the `captioner_meta`, `captioner_routed`, `captioner_face_wait`
+and `captioner_album_member` tables whenever Postgres credentials are set, in either mode. No
+other schema changes are made.
 
 ---
 

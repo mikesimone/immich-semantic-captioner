@@ -142,7 +142,7 @@ FULL_CAPTION_ALBUM_KEYWORDS = [
     for k in os.environ.get("FULL_CAPTION_ALBUMS", "camspy,lv hookers").split(",")
     if k.strip()
 ]
-UNCATEGORIZED_CAPTION = os.environ.get("UNCATEGORIZED_CAPTION", "Please categorize")
+UNCATEGORIZED_CAPTION = os.environ.get("UNCATEGORIZED_CAPTION", "Please Categorize")
 
 # Assets shot on these EXIF make/model get auto-filed into Camspy.
 CAMSPY_ALBUM_ID = os.environ.get("CAMSPY_ALBUM_ID", "64643582-0623-4bc2-931f-30149cbd6e45")
@@ -246,11 +246,12 @@ INCLUDE_HIDDEN_PEOPLE = os.environ.get("INCLUDE_HIDDEN_PEOPLE", "0") == "1"
 def canonical_people_name(raw_name: str) -> str:
     return _PEOPLE_NAME_OVERRIDES.get(raw_name, raw_name)
 
-def get_asset_people_names(asset_id: str) -> List[str]:
+def get_asset_people_names(asset_id: str, raw: bool = False) -> List[str]:
     """Fetch named Immich People tagged on this asset (independent of album membership).
     GET /api/assets/{id} includes a "people" array with name/isHidden per tagged face --
     verified empirically to be populated there even though /api/search/metadata's own
-    "people" field is not."""
+    "people" field is not. raw=True returns the names as spelled in Immich, before
+    PEOPLE_NAME_OVERRIDES -- upload routing matches those against album titles."""
     try:
         r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}", headers=immich_headers(), timeout=30)
         r.raise_for_status()
@@ -263,7 +264,7 @@ def get_asset_people_names(asset_id: str) -> List[str]:
                 continue
             if p.get("isHidden") and not INCLUDE_HIDDEN_PEOPLE:
                 continue
-            cname = canonical_people_name(name)
+            cname = name if raw else canonical_people_name(name)
             key = cname.lower()
             if key not in seen:
                 seen.add(key)
@@ -1352,7 +1353,9 @@ def strip_false_nudity_leaks(caption: str, albums: List[str]) -> str:
 def extract_video_frames(video_path: str, dense: bool = False) -> List[Tuple[float, Image.Image]]:
     duration = probe_duration_seconds(video_path)
     timestamps = compute_dense_timestamps(duration) if dense else compute_video_timestamps(duration)
+    return extract_frames_at(video_path, timestamps)
 
+def extract_frames_at(video_path: str, timestamps: List[float]) -> List[Tuple[float, Image.Image]]:
     frames: List[Tuple[float, Image.Image]] = []
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, ts in enumerate(timestamps):
@@ -1650,6 +1653,94 @@ def _parse_person_desc(text: str) -> Tuple[List[str], List[str], List[str]]:
         ages.append(age)
     return breasts, races, ages
 
+def detect_single_creampie(signals: List[dict]) -> Optional[float]:
+    """Timestamp of the one creampie in a video's dense signals, or None. See the reasoning
+    in caption_video() where this is called for the at-most-one-creampie case."""
+    last_ts = signals[-1]["ts"] if signals else 0.0
+    earliest_plausible = last_ts * CREAMPIE_EARLIEST_FRACTION
+
+    cum_ts = None
+    seen_insertion = False
+    seen_partner = False
+    for s in signals:
+        if s["partner_visible"]:
+            seen_partner = True
+        if s["state"] == "INSERTED":
+            seen_insertion = True
+        elif (s["state"] == "CUM" and seen_insertion and seen_partner
+              and s["ts"] >= earliest_plausible):
+            cum_ts = s["ts"]
+    return cum_ts
+
+def compact_porn_caption(
+    signals: List[dict],
+    frames: List[Tuple[float, Image.Image]],
+    caption_detailed,
+    person_names: Optional[List[str]] = None,
+    masturbation: bool = False,
+    count: int = 0,
+    event_times: Optional[List[str]] = None,
+) -> str:
+    """The compact "Field | value" porn caption, built from a video's dense signals."""
+    event_times = event_times or []
+    bound_ever = any(s["bound"] for s in signals)
+    species = next((s["species"] for s in signals if s["species"]), None)
+    lactating_ever = any(s["lactating"] for s in signals)
+
+    # Representative frame for the compact person description -- prefer an actually-nude
+    # frame over an arbitrary one, and skip title cards/intro screens.
+    nude_frames = [(s["ts"], s["img"]) for s in signals if not s["titlecard"] and s["nudity"]]
+    candidates = nude_frames or frames
+    _, desc_img = candidates[len(candidates) // 2]
+
+    breasts, races, ages = [], [], []
+    if not (person_names and set(person_names) <= COMPACT_DESC_SKIP_NAMES):
+        person_desc = caption_detailed(
+            desc_img, prompt_override=build_compact_person_prompt(), max_new_tokens=80, greedy=True
+        ).strip()
+        if person_desc:
+            breasts, races, ages = _parse_person_desc(person_desc)
+
+    # Only asked for Masturbation-album content -- see _MASTURBATION_PROMPT. Prefer a
+    # frame with no partner in it, since that's where she'd actually be using something
+    # on herself rather than being fucked.
+    implement = None
+    if masturbation:
+        solo = [(s["ts"], s["img"]) for s in signals
+                if not s["titlecard"] and s["nudity"] and not s["partner_visible"]]
+        solo_candidates = solo or nude_frames or frames
+        _, solo_img = solo_candidates[len(solo_candidates) // 2]
+        implement = _parse_masturbation_answer(
+            caption_detailed(solo_img, prompt_override=_MASTURBATION_PROMPT,
+                             max_new_tokens=24, greedy=True)
+        )
+
+    # Labeled "Field | value" lines -- self-documenting on purpose, since a bare
+    # comma-separated blob is meaningless to re-read weeks later.
+    fields: List[Tuple[str, str]] = []
+    if count >= 1:
+        fields.append(("Separate Creampies", f"{count} (~{', '.join(event_times)})"))
+    if breasts:
+        fields.append(("Breast Size", ", ".join(breasts)))
+    if races:
+        fields.append(("Race", ", ".join(races)))
+    if ages:
+        fields.append(("Approximate Age", ", ".join(ages)))
+    if bound_ever:
+        fields.append(("Restrained", "yes"))
+    if species:
+        fields.append(("Interspecies", species))
+    if lactating_ever:
+        fields.append(("Lactating", "yes"))
+    if implement:
+        fields.append(("Masturbating With", implement))
+
+    if fields:
+        caption = " | ".join(f"{label} | {value}" for label, value in fields)
+    else:
+        caption = "Explicit content -- no further detail detected."
+    return caption
+
 def caption_video(
     asset_id: str,
     caption_detailed,
@@ -1663,11 +1754,17 @@ def caption_video(
     full_caption: bool = False,
     masturbation: bool = False,
     categorized: bool = True,
+    video_path: Optional[str] = None,
 ) -> Tuple[str, str]:
-    fd, video_path = tempfile.mkstemp(suffix=".mp4")
-    os.close(fd)
+    # A caller that already downloaded the original (upload routing does, to triage it)
+    # passes it in and keeps ownership of the file; otherwise it's fetched here and removed.
+    owns_file = video_path is None
+    if owns_file:
+        fd, video_path = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
     try:
-        immich_download_original(asset_id, video_path)
+        if owns_file:
+            immich_download_original(asset_id, video_path)
         frames = extract_video_frames(video_path, dense=dense)
         if not frames:
             raise RuntimeError("no frames extracted")
@@ -1758,87 +1855,23 @@ def caption_video(
             # setup scene one minute into a twenty-minute video answering GENITALS: Y,
             # CUMLOC: VAGINA -- and an early "creampie" is essentially always one of those,
             # because the scene hasn't happened yet.
-            last_ts = signals[-1]["ts"] if signals else 0.0
-            earliest_plausible = last_ts * CREAMPIE_EARLIEST_FRACTION
-
-            cum_ts = None
-            seen_insertion = False
-            seen_partner = False
-            for s in signals:
-                if s["partner_visible"]:
-                    seen_partner = True
-                if s["state"] == "INSERTED":
-                    seen_insertion = True
-                elif (s["state"] == "CUM" and seen_insertion and seen_partner
-                      and s["ts"] >= earliest_plausible):
-                    cum_ts = s["ts"]
+            cum_ts = detect_single_creampie(signals)
             count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
         else:
             count, event_times = count_creampie_events(
                 [(s["ts"], s["state"], s["partner_visible"]) for s in signals]
             )
-        bound_ever = any(s["bound"] for s in signals)
-        species = next((s["species"] for s in signals if s["species"]), None)
-        lactating_ever = any(s["lactating"] for s in signals)
-
-        # Representative frame for the compact person description -- prefer an actually-nude
-        # frame over an arbitrary one, and skip title cards/intro screens.
-        nude_frames = [(s["ts"], s["img"]) for s in signals if not s["titlecard"] and s["nudity"]]
-        candidates = nude_frames or frames
-        _, desc_img = candidates[len(candidates) // 2]
-
-        breasts, races, ages = [], [], []
-        if not (person_names and set(person_names) <= COMPACT_DESC_SKIP_NAMES):
-            person_desc = caption_detailed(
-                desc_img, prompt_override=build_compact_person_prompt(), max_new_tokens=80, greedy=True
-            ).strip()
-            if person_desc:
-                breasts, races, ages = _parse_person_desc(person_desc)
-
-        # Only asked for Masturbation-album content -- see _MASTURBATION_PROMPT. Prefer a
-        # frame with no partner in it, since that's where she'd actually be using something
-        # on herself rather than being fucked.
-        implement = None
-        if masturbation:
-            solo = [(s["ts"], s["img"]) for s in signals
-                    if not s["titlecard"] and s["nudity"] and not s["partner_visible"]]
-            solo_candidates = solo or nude_frames or frames
-            _, solo_img = solo_candidates[len(solo_candidates) // 2]
-            implement = _parse_masturbation_answer(
-                caption_detailed(solo_img, prompt_override=_MASTURBATION_PROMPT,
-                                 max_new_tokens=24, greedy=True)
-            )
-
-        # Labeled "Field | value" lines -- self-documenting on purpose, since a bare
-        # comma-separated blob is meaningless to re-read weeks later.
-        fields: List[Tuple[str, str]] = []
-        if count >= 1:
-            fields.append(("Separate Creampies", f"{count} (~{', '.join(event_times)})"))
-        if breasts:
-            fields.append(("Breast Size", ", ".join(breasts)))
-        if races:
-            fields.append(("Race", ", ".join(races)))
-        if ages:
-            fields.append(("Approximate Age", ", ".join(ages)))
-        if bound_ever:
-            fields.append(("Restrained", "yes"))
-        if species:
-            fields.append(("Interspecies", species))
-        if lactating_ever:
-            fields.append(("Lactating", "yes"))
-        if implement:
-            fields.append(("Masturbating With", implement))
-
-        if fields:
-            caption = " | ".join(f"{label} | {value}" for label, value in fields)
-        else:
-            caption = "Explicit content -- no further detail detected."
+        caption = compact_porn_caption(
+            signals, frames, caption_detailed, person_names=person_names,
+            masturbation=masturbation, count=count, event_times=event_times,
+        )
         return caption, "VIDEO-PORN-COMPACT"
     finally:
-        try:
-            os.remove(video_path)
-        except OSError:
-            pass
+        if owns_file:
+            try:
+                os.remove(video_path)
+            except OSError:
+                pass
 
 # Tagging (unchanged)
 _tag_cache: Dict[str, Optional[str]] = {}
@@ -2000,18 +2033,23 @@ def immich_archive(asset_id: str) -> None:
         print(f"[archive] {asset_id} failed: {e}", flush=True)
 
 _album_list_cache: Optional[List[dict]] = None
+_album_list_cached_at = 0.0
+# Albums get created and renumbered while the captioner runs for days at a time, and routing
+# looks albums up by number, so the list can't be cached for the life of the process.
+ALBUM_LIST_TTL_SECONDS = float(os.environ.get("ALBUM_LIST_TTL_SECONDS", "300"))
 
 def immich_list_albums() -> List[dict]:
-    global _album_list_cache
-    if _album_list_cache is not None:
+    global _album_list_cache, _album_list_cached_at
+    if _album_list_cache is not None and time.time() - _album_list_cached_at < ALBUM_LIST_TTL_SECONDS:
         return _album_list_cache
     try:
         r = requests.get(f"{IMMICH_URL}/api/albums", headers=immich_headers(), timeout=60)
         r.raise_for_status()
         _album_list_cache = r.json()
+        _album_list_cached_at = time.time()
     except Exception as e:
         print(f"[album] list failed: {e}", flush=True)
-        return []
+        return _album_list_cache or []
     return _album_list_cache
 
 def immich_album_id_by_name(name: str) -> Optional[str]:
@@ -2168,7 +2206,7 @@ def pg_mark_skip(conn, asset_id: str, reason: str):
             (asset_id, reason),
         )
 
-def pg_fetch_candidates(conn, limit: int) -> List[dict]:
+def pg_fetch_candidates(conn, limit: int, exclude_face_wait: bool = False) -> List[dict]:
     import psycopg2.extras
     has_type = pg_column_exists(conn, "asset", "type")
     select_type = 'a."type",' if has_type else "NULL::text as type,"
@@ -2181,20 +2219,32 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
     else:
         order_clause = 'ORDER BY a."createdAt" DESC'
 
+    # New uploads waiting on face recognition (upload routing, step 2) are left out until
+    # their next check is due, so the queue moves on to other work meanwhile.
+    face_wait_join = (
+        "LEFT JOIN captioner_face_wait fw ON fw.asset_id = a.id" if exclude_face_wait else ""
+    )
+    face_wait_filter = (
+        "AND (fw.asset_id IS NULL OR fw.next_check <= now())" if exclude_face_wait else ""
+    )
+
     sql = f"""
     SELECT
       a.id as id,
       {select_type}
       ae.description as description,
       ae.make as exif_make,
+      a."originalFileName" as original_file_name,
       COALESCE(array_remove(array_agg(al."albumName"), NULL), '{{}}'::text[]) as albums
     FROM asset a
     JOIN asset_exif ae ON ae."assetId" = a.id
     LEFT JOIN captioner_skip cs ON cs.asset_id = a.id
     LEFT JOIN album_asset aa ON aa."assetId" = a.id
     LEFT JOIN album al ON al.id = aa."albumId"
+    {face_wait_join}
     WHERE
       cs.asset_id IS NULL
+      {face_wait_filter}
       AND (
         ae.description IS NULL
         OR btrim(ae.description) = ''
@@ -2207,7 +2257,7 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
         -- percent signs for the same reason.
         OR (btrim(ae.description) LIKE '{{%%' AND btrim(ae.description) LIKE '%%}}')
       )
-    GROUP BY a.id, ae.description, ae.make {', a."type"' if has_type else ''}
+    GROUP BY a.id, ae.description, ae.make, a."originalFileName" {', a."type"' if has_type else ''}
     {order_clause}
     LIMIT %s;
     """
@@ -2215,6 +2265,560 @@ def pg_fetch_candidates(conn, limit: int) -> List[dict]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, (limit,))
         return list(cur.fetchall())
+
+# ----------------------------
+# Upload routing (new assets) and album-move handling
+# ----------------------------
+# Two things happen here that the rest of this file doesn't do:
+#
+#   * A genuinely NEW asset -- in no album, and never processed before -- is walked through a
+#     fixed decision order before it gets captioned: CamSpy, then "is this one of us" (face
+#     recognition), then anthro, then nudity, then the porn categories. Each step can file it
+#     into albums, archive it, and stop. Assets that are already filed, or that were
+#     captioned once and had their description cleared (apply_people_names.py does this
+#     hourly, and so does the human to re-queue something), skip all of that and are simply
+#     re-captioned by the albums they sit in, exactly as before.
+#
+#   * An asset the HUMAN adds to certain albums gets acted on: Multiple Creampie and the
+#     100.000.x branch run the CumCounter, Single Creampie archives, and anything parked at
+#     "Please Categorize" loses that prefix once it's filed. Immich has no event for "asset
+#     added to album", so membership is snapshotted in Postgres and diffed on a timer.
+#
+# Both need state that survives restarts (what's been routed, what's waiting on face
+# recognition, the membership snapshot), which lives in three small captioner_* tables in the
+# Immich database. Without Postgres credentials, routing and move handling are switched off
+# and everything is captioned by album the old way.
+ROUTING_ENABLED = os.environ.get("ROUTING_ENABLED", "1") == "1"
+
+# Face recognition runs a while after upload. A new asset waits for Immich to finish it
+# (asset_job_status."facesRecognizedAt"), plus a grace period for the per-face recognition
+# jobs that detection queues, before step 2 decides whether it shows one of us. After
+# FACE_WAIT_MAX_SECONDS it goes ahead regardless, treated as nobody known.
+FACE_WAIT_GRACE_SECONDS = int(os.environ.get("FACE_WAIT_GRACE_SECONDS", "120"))
+FACE_WAIT_MAX_SECONDS = int(os.environ.get("FACE_WAIT_MAX_SECONDS", "3600"))
+FACE_WAIT_RECHECK_SECONDS = int(os.environ.get("FACE_WAIT_RECHECK_SECONDS", "60"))
+
+MOVE_POLL_SECONDS = float(os.environ.get("MOVE_POLL_SECONDS", "60"))
+# A move whose handling keeps failing (e.g. the video won't download) is given up on after
+# this many attempts, so one broken file can't hold the GPU in a retry loop.
+MOVE_MAX_ATTEMPTS = int(os.environ.get("MOVE_MAX_ATTEMPTS", "3"))
+
+# Per-frame classifier answers are noisy even under greedy decoding, so a video only counts
+# as showing something when at least this many sampled frames say so (videos with fewer
+# than three sampled frames need just one).
+VIDEO_FLAG_MIN_FRAMES = int(os.environ.get("VIDEO_FLAG_MIN_FRAMES", "2"))
+# Cap on how many frames get the (longer) porn-category prompt.
+PORN_PROMPT_MAX_FRAMES = int(os.environ.get("PORN_PROMPT_MAX_FRAMES", "12"))
+# Extra early timestamps checked for studio title cards/logos, which open the video and
+# fall before the regular head samples.
+TITLECARD_TIMESTAMPS = [
+    float(x) for x in os.environ.get("TITLECARD_TIMESTAMPS", "0.5,2,5,10").split(",") if x.strip()
+]
+
+CAMSPY_FILENAME_KEYWORD = os.environ.get("CAMSPY_FILENAME_KEYWORD", "SpyPhoto").strip().lower()
+
+# Immich People who must NOT be treated as "one of us" in step 2. LydiaDog is a generated
+# character with her own step-3 rule, not a person album.
+ROUTING_PERSON_EXCLUDE = {
+    n.strip().casefold()
+    for n in os.environ.get("ROUTING_PERSON_EXCLUDE", "Lydia Dog,LydiaDog").split(",")
+    if n.strip()
+}
+
+# LydiaDog match for anthro stills. Three signals, strongest first: the generation-info JSON
+# naming her LoRA (every render from the local pipeline carries it), Immich's own Person tag,
+# and a low-threshold face re-detection compared against the faces already tagged as her --
+# the same technique scripts/tag_album_people_faces.py uses, because the stock detector finds
+# a face on only a few percent of these renders.
+LYDIADOG_PERSON_NAME = os.environ.get("LYDIADOG_PERSON_NAME", "Lydia Dog")
+LYDIADOG_GEN_INFO_KEYWORDS = [
+    k.strip().lower()
+    for k in os.environ.get("LYDIADOG_GEN_INFO_KEYWORDS", "lydiadog,lydia_dog,lydia-dog").split(",")
+    if k.strip()
+]
+LYDIADOG_MIN_SIMILARITY = float(os.environ.get("LYDIADOG_MIN_SIMILARITY", "0.70"))
+LYDIADOG_DETECT_MIN_SCORE = float(os.environ.get("LYDIADOG_DETECT_MIN_SCORE", "0.05"))
+ML_URL = os.environ.get("ML_URL", "http://immich-machine-learning:3003/predict")
+ML_FACE_MODEL = os.environ.get("ML_FACE_MODEL", "buffalo_l")
+
+ANTHRO_VIDEO_ALBUM_ID = os.environ.get("ANTHRO_VIDEO_ALBUM_ID", "9d09367b-1416-4488-996d-6f4caca26ae1")
+MULTIPLE_CREAMPIE_ALBUM_ID = os.environ.get("MULTIPLE_CREAMPIE_ALBUM_ID", "e7479905-44b5-42ca-86d0-aaf8fb7c36e3")
+
+# Routing albums are found by their number, so renaming the text after the number (or
+# renumbering, via ROUTING_ALBUM_NUMBERS="key=number;...") needs no code change. Trailing
+# ".000" groups are ignored when comparing, so "300.001" also finds "300.001.000 - ...".
+# Where the number isn't found, the album's known ID is used instead if there is one.
+_DEFAULT_ROUTING_ALBUM_NUMBERS = {
+    "camspy": "400.001",
+    "furry": "300.000.000",
+    "cow_anthro": "300.000.002",
+    "anthro_video": "300.001",
+    "anthro_sex_video": "300.002",
+    "human_anthro_video": "300.004",
+    "human_anthro_still": "300.005",
+    "lydia_dog": "300.006.000",
+    "multi": "200.000.000",
+    "puta_locura": "200.000.001",
+    "creampie_squad": "200.000.002",
+    "gangbang_creampie": "200.000.003",
+    "slutwife_jessica": "200.000.004",
+    "slutwife_marion": "200.000.005",
+    "glorywall": "200.000.006",
+    "hentaied": "200.000.008",
+    "single": "200.001.000",
+    "bondage_creampie": "200.002.000",
+    "internet_titties": "200.010.000",
+    "masturbation": "200.010.001",
+    "lactation": "200.010.002",
+}
+ROUTING_ALBUM_NUMBERS = {
+    **_DEFAULT_ROUTING_ALBUM_NUMBERS,
+    **_parse_kv_map(os.environ.get("ROUTING_ALBUM_NUMBERS", "")),
+}
+_ROUTING_ALBUM_FALLBACK_IDS = {
+    "camspy": CAMSPY_ALBUM_ID,
+    "furry": FURRY_ALBUM_ID,
+    "anthro_video": ANTHRO_VIDEO_ALBUM_ID,
+    "multi": MULTIPLE_CREAMPIE_ALBUM_ID,
+    "single": SINGLE_CREAMPIE_ALBUM_ID,
+    "lactation": LACTATION_ALBUM_ID,
+    # Hucow has no number in the routing spec, so it's only ever found by ID.
+    "hucow": HUCOW_ALBUM_ID,
+}
+# Albums that are porn categories: filing into any of them makes the asset archivable.
+_PORN_ALBUM_KEYS = {
+    "multi", "puta_locura", "creampie_squad", "gangbang_creampie", "slutwife_jessica",
+    "slutwife_marion", "glorywall", "hentaied", "single", "bondage_creampie",
+    "internet_titties", "masturbation", "lactation", "hucow",
+}
+# Studio logo / title card / filename -> album. Matched against lowercase text with
+# everything but letters and digits removed, so "SLUTWIFE-Jessica", "Slutwife Jessica" and
+# "slutwifejessica" all hit. Every studio match also goes into Multiple Creampie.
+STUDIO_RULES: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"slutwifejessica"), "slutwife_jessica"),
+    (re.compile(r"slutwifemarion"), "slutwife_marion"),
+    (re.compile(r"putalocura"), "puta_locura"),
+    (re.compile(r"creampiesquad"), "creampie_squad"),
+    (re.compile(r"gangbangcreampie|(?:5|five)guycreampie"), "gangbang_creampie"),
+]
+_HENTAIED_TEXT_RE = re.compile(r"hentaied")
+MULTI_EVENT_COUNT_ALBUM_PREFIXES = tuple(
+    p.strip() for p in os.environ.get("MULTI_EVENT_COUNT_ALBUM_PREFIXES", "100.000.").split(",")
+    if p.strip()
+)
+
+_ALBUM_NUMBER_RE = re.compile(r"^\s*(\d{3}(?:\.\d{3})*)(?!\d)")
+_ALBUM_TITLE_RE = re.compile(r"^\s*\d{3}(?:\.\d{3})*\s*-\s*(.+?)\s*$")
+
+def album_number(album_name: str) -> Optional[str]:
+    m = _ALBUM_NUMBER_RE.match(album_name or "")
+    return m.group(1) if m else None
+
+def normalize_album_number(number: str) -> str:
+    parts = (number or "").strip().split(".")
+    while len(parts) > 1 and parts[-1] == "000":
+        parts.pop()
+    return ".".join(parts)
+
+def album_title(album_name: str) -> str:
+    """The part of an album name after its number: "002.000 - Lydia" -> "Lydia"."""
+    m = _ALBUM_TITLE_RE.match(album_name or "")
+    return m.group(1) if m else (album_name or "").strip()
+
+_missing_album_warned: set = set()
+
+def album_id_for(key: str) -> Optional[str]:
+    number = ROUTING_ALBUM_NUMBERS.get(key)
+    if number:
+        want = normalize_album_number(number)
+        for a in immich_list_albums():
+            n = album_number(a.get("albumName") or "")
+            if n and normalize_album_number(n) == want:
+                return a.get("id")
+    fallback = _ROUTING_ALBUM_FALLBACK_IDS.get(key)
+    if fallback:
+        return fallback
+    if key not in _missing_album_warned:
+        _missing_album_warned.add(key)
+        print(f"[route] WARNING: no album numbered {number} for '{key}' -- not filing there", flush=True)
+    return None
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+def match_studio(text: str) -> Optional[str]:
+    t = _compact_text(text)
+    for rx, key in STUDIO_RULES:
+        if rx.search(t):
+            return key
+    return None
+
+def is_camspy_upload(exif_make: Optional[str], filename: Optional[str]) -> bool:
+    if (exif_make or "").strip().lower() == CAMSPY_EXIF_MAKE:
+        return True
+    return bool(CAMSPY_FILENAME_KEYWORD) and CAMSPY_FILENAME_KEYWORD in (filename or "").lower()
+
+# ---- "Please Categorize" prefix and creampie-count field editing ----
+def has_uncategorized_prefix(caption: str) -> bool:
+    c = (caption or "").strip().lower()
+    p = UNCATEGORIZED_CAPTION.lower()
+    return c == p or c.startswith(p + " |")
+
+def strip_uncategorized_prefix(caption: str) -> str:
+    c = (caption or "").strip()
+    if not has_uncategorized_prefix(c):
+        return c
+    return c[len(UNCATEGORIZED_CAPTION):].lstrip().lstrip("|").strip()
+
+def with_uncategorized_prefix(caption: str) -> str:
+    c = strip_uncategorized_prefix(caption)
+    return f"{UNCATEGORIZED_CAPTION} | {c}" if c else UNCATEGORIZED_CAPTION
+
+def with_creampie_count(caption: str, count: int, event_times: List[str]) -> str:
+    """Replace (or add) the "Separate Creampies" field, leaving every other field as is."""
+    parts = [p.strip() for p in (caption or "").split(" | ")]
+    if len(parts) >= 2 and parts[0].lower() == "separate creampies":
+        parts = parts[2:]
+    rest = " | ".join(p for p in parts if p)
+    if count < 1:
+        return rest
+    field = f"Separate Creampies | {count} (~{', '.join(event_times)})"
+    return f"{field} | {rest}" if rest else field
+
+# ---- Classifier prompts for routing ----
+_TRIAGE_PROMPT = (
+    "Look at this image. Respond with ONLY these four labeled lines, nothing else -- no other "
+    "sentences or explanations.\n"
+    "ANTHRO: Y or N -- Y if any anthropomorphic animal character is shown: a humanoid "
+    "character with an animal head, muzzle or snout, fur covering the body, paws, or an animal "
+    "tail (furry / anthro art, whether drawn, painted, or 3D-rendered). N for real animals. N "
+    "for an ordinary human, including a human wearing animal ears, a tail, horns, or cow-print "
+    "clothing as a costume or accessory.\n"
+    "COW: Y or N -- Y only if ANTHRO is Y and at least one anthro character is a cow, bull, or "
+    "other bovine.\n"
+    "SEX: one of NONE, SOLO, HUMAN-HUMAN, HUMAN-ANTHRO, ANTHRO-ANTHRO -- whether a sex act is "
+    "happening right now and between whom. HUMAN-ANTHRO when a human and an anthro character "
+    "are having sex with each other. ANTHRO-ANTHRO when only anthro characters are. HUMAN-HUMAN "
+    "when only humans are. SOLO when one character is masturbating alone. NONE if no sex act is "
+    "happening (posing nude is NONE).\n"
+    "NUDITY: Y or N -- Y if any bare breast, bare nipple, bare butt, or genitals are visible, "
+    "even partially (e.g. a nipple peeking out of clothing). Otherwise N.\n"
+    "Example answer:\nANTHRO: N\nCOW: N\nSEX: NONE\nNUDITY: N"
+)
+
+def _parse_triage(text: str) -> dict:
+    t = (text or "").upper()
+    m = re.search(r"SEX\s*:\s*(NONE|SOLO|HUMAN-HUMAN|HUMAN-ANTHRO|ANTHRO-HUMAN|ANTHRO-ANTHRO)\b", t)
+    sex = m.group(1) if m else "NONE"
+    if sex == "ANTHRO-HUMAN":
+        sex = "HUMAN-ANTHRO"
+    anthro = bool(re.search(r"ANTHRO\s*:\s*Y", t))
+    return {
+        "anthro": anthro,
+        "cow": anthro and bool(re.search(r"COW\s*:\s*Y", t)),
+        "sex_human_anthro": sex == "HUMAN-ANTHRO",
+        "sex_anthro_anthro": sex == "ANTHRO-ANTHRO",
+        "nudity": bool(re.search(r"NUDITY\s*:\s*Y", t)),
+    }
+
+_PORN_CATEGORY_PROMPT = (
+    "Look at this image. Respond with ONLY these eight labeled lines, nothing else -- no other "
+    "sentences or explanations.\n"
+    "WOMEN: the number of adult women clearly visible, as a digit (0, 1, 2, 3 ...).\n"
+    "MEN: Y or N -- Y if any man, or any part of a man (body, hand, cock), is visible.\n"
+    "MASTURBATING: Y or N -- Y if a woman is rubbing, fingering, or penetrating her own pussy, "
+    "clit, or ass with her hand, fingers, or a toy.\n"
+    "COWPRINT: Y or N -- Y if a woman is wearing black-and-white cow-print clothing or "
+    "accessories, or cow horns.\n"
+    "LACTATING: Y or N -- Y if milk is visibly leaking, dripping, or spraying from a woman's "
+    "bare nipples/breasts.\n"
+    "GLORYWALL: Y or N -- Y if a woman is stuck through a wall or partition, with her upper "
+    "body on one side and her ass and legs on the other side, so she can be used from the "
+    "other side.\n"
+    "TENTACLES: Y or N -- Y if tentacles are wrapped around or penetrating a woman.\n"
+    "CUMLOC: where a visible load of cum/jizz is, exactly one of VAGINA (in, on, or leaking out "
+    "of her vagina), FACE, TITS, ASS, BODY, NONE. Lubricant clinging to a shaft, her own clear "
+    "wetness, and milk are all NONE.\n"
+    "Example answer:\nWOMEN: 1\nMEN: N\nMASTURBATING: N\nCOWPRINT: N\nLACTATING: N\n"
+    "GLORYWALL: N\nTENTACLES: N\nCUMLOC: NONE"
+)
+
+def _parse_porn_categories(text: str) -> dict:
+    t = (text or "").upper()
+    m = re.search(r"WOMEN\s*:\s*(\d+)", t)
+    m2 = re.search(r"CUMLOC\s*:\s*(VAGINA|FACE|TITS|ASS|BODY|NONE)\b", t)
+    return {
+        "women": int(m.group(1)) if m else 0,
+        "men": bool(re.search(r"(?<!WO)MEN\s*:\s*Y", t)),
+        "masturbating": bool(re.search(r"MASTURBATING\s*:\s*Y", t)),
+        "cowprint": bool(re.search(r"COWPRINT\s*:\s*Y", t)),
+        "lactating": bool(re.search(r"LACTATING\s*:\s*Y", t)),
+        "glorywall": bool(re.search(r"GLORYWALL\s*:\s*Y", t)),
+        "tentacles": bool(re.search(r"TENTACLES\s*:\s*Y", t)),
+        "vaginal_cum": bool(m2) and m2.group(1) == "VAGINA",
+    }
+
+def _classify_with_prompt(images: List[Image.Image], prompt: str, parser, caption_detailed,
+                          max_new_tokens: int = 80) -> List[dict]:
+    if not images:
+        return []
+    batch_fn = getattr(caption_detailed, "batch", None)
+    if batch_fn:
+        raw = batch_fn([
+            {"pil_image": img, "prompt_override": prompt, "max_new_tokens": max_new_tokens, "greedy": True}
+            for img in images
+        ])
+    else:
+        raw = [caption_detailed(img, prompt_override=prompt, max_new_tokens=max_new_tokens, greedy=True)
+               for img in images]
+    return [parser(text) for text in raw]
+
+def frames_agree(rows: List[dict], key: str) -> bool:
+    """Whether enough of the per-frame answers say `key` -- see VIDEO_FLAG_MIN_FRAMES."""
+    if not rows:
+        return False
+    need = 1 if len(rows) < 3 else min(VIDEO_FLAG_MIN_FRAMES, len(rows))
+    return sum(1 for r in rows if r.get(key)) >= need
+
+def _evenly(items: list, n: int) -> list:
+    if len(items) <= n:
+        return items
+    step = len(items) / n
+    return [items[int(i * step)] for i in range(n)]
+
+# ---- LydiaDog face match ----
+_lydiadog_refs: Dict[str, object] = {"at": 0.0, "embeddings": []}
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    if not na or not nb:
+        return 0.0
+    return sum(x * y for x, y in zip(a, b)) / (na * nb)
+
+def _ml_detect_faces(image_bytes: bytes) -> List[dict]:
+    entries = json.dumps({
+        "facial-recognition": {
+            "detection": {"modelName": ML_FACE_MODEL, "options": {"minScore": LYDIADOG_DETECT_MIN_SCORE}},
+            "recognition": {"modelName": ML_FACE_MODEL},
+        }
+    })
+    r = requests.post(ML_URL, data={"entries": entries},
+                      files={"image": ("image.jpg", io.BytesIO(image_bytes), "application/octet-stream")},
+                      timeout=300)
+    r.raise_for_status()
+    out = []
+    for f in r.json().get("facial-recognition") or []:
+        emb = f.get("embedding")
+        if isinstance(emb, str):
+            try:
+                emb = json.loads(emb)
+            except ValueError:
+                emb = None
+        if emb:
+            out.append({"score": float(f.get("score") or 0.0), "embedding": emb})
+    return out
+
+def matches_lydiadog(asset_id: str, gen_info: Optional[str], raw_people: List[str],
+                     state: "RoutingState") -> bool:
+    if gen_info and any(kw in gen_info.lower() for kw in LYDIADOG_GEN_INFO_KEYWORDS):
+        print(f"[route] {asset_id} LydiaDog by generation info", flush=True)
+        return True
+    if any(n.casefold() == LYDIADOG_PERSON_NAME.casefold() for n in raw_people):
+        print(f"[route] {asset_id} LydiaDog by Immich person tag", flush=True)
+        return True
+    if time.time() - float(_lydiadog_refs["at"]) > 3600:
+        _lydiadog_refs["embeddings"] = state.person_face_embeddings(LYDIADOG_PERSON_NAME)
+        _lydiadog_refs["at"] = time.time()
+    refs = _lydiadog_refs["embeddings"]
+    if not refs:
+        return False
+    try:
+        r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}/thumbnail", headers=immich_headers(),
+                         params={"size": "preview"}, timeout=120)
+        r.raise_for_status()
+        faces = _ml_detect_faces(r.content)
+    except Exception as e:
+        print(f"[route] {asset_id} LydiaDog face check failed: {e}", flush=True)
+        return False
+    best = max((max(_cosine(f["embedding"], ref) for ref in refs) for f in faces), default=0.0)
+    if best >= LYDIADOG_MIN_SIMILARITY:
+        print(f"[route] {asset_id} LydiaDog by face similarity {best:.2f}", flush=True)
+        return True
+    return False
+
+# ---- Person albums (step 2) ----
+def person_albums(raw_people: List[str]) -> List[Tuple[str, str, str]]:
+    """(person, album name, album id) for each tagged person who has an album of their own --
+    one whose title after the number is exactly their Immich name, or their name after
+    PEOPLE_NAME_OVERRIDES. A person with several such albums gets the lowest-numbered one."""
+    albums = immich_list_albums()
+    out: List[Tuple[str, str, str]] = []
+    for raw in raw_people:
+        canon = canonical_people_name(raw)
+        if raw.casefold() in ROUTING_PERSON_EXCLUDE or canon.casefold() in ROUTING_PERSON_EXCLUDE:
+            continue
+        wanted = {raw.casefold(), canon.casefold()}
+        hits = sorted(
+            (a.get("albumName") or "", a.get("id"))
+            for a in albums
+            if album_title(a.get("albumName") or "").casefold() in wanted and a.get("id")
+        )
+        if hits:
+            out.append((raw, hits[0][0], hits[0][1]))
+    return out
+
+# ---- Persistent state (Postgres) ----
+class RoutingState:
+    def __init__(self, conn):
+        self.conn = conn
+        self._ensure_tables()
+        self.has_job_status = pg_column_exists(conn, "asset_job_status", "facesRecognizedAt")
+        if not self.has_job_status:
+            print("[route] asset_job_status.facesRecognizedAt not found -- face wait falls back to "
+                  "FACE_WAIT_GRACE_SECONDS after upload", flush=True)
+        self.face_has_deleted_at = pg_column_exists(conn, "asset_face", "deletedAt")
+
+    def _exec(self, sql: str, params=None):
+        with self.conn.cursor() as cur:
+            if params is None:
+                cur.execute(sql)
+            else:
+                cur.execute(sql, params)
+            return cur.fetchall() if cur.description else None
+
+    def _meta_get(self, key: str) -> Optional[str]:
+        rows = self._exec("SELECT value FROM captioner_meta WHERE key = %s", (key,))
+        return rows[0][0] if rows else None
+
+    def _meta_set(self, key: str, value: str) -> None:
+        self._exec("INSERT INTO captioner_meta(key, value) VALUES (%s, %s) "
+                   "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, value))
+
+    def _ensure_tables(self) -> None:
+        self._exec("""
+            CREATE TABLE IF NOT EXISTS captioner_meta (key text PRIMARY KEY, value text NOT NULL);
+            CREATE TABLE IF NOT EXISTS captioner_routed (
+              asset_id uuid PRIMARY KEY, outcome text NOT NULL,
+              routed_at timestamptz NOT NULL DEFAULT now());
+            CREATE TABLE IF NOT EXISTS captioner_face_wait (
+              asset_id uuid PRIMARY KEY, next_check timestamptz NOT NULL);
+            CREATE TABLE IF NOT EXISTS captioner_album_member (
+              album_id uuid NOT NULL, asset_id uuid NOT NULL, PRIMARY KEY (album_id, asset_id));
+        """)
+        # First run only: everything that already has a real caption was processed before
+        # routing existed, so clearing its description later must not make it look new.
+        # Descriptions holding nothing but generation info are NOT seeded -- those are fresh
+        # renders from the local pipeline that were never captioned. (No bound parameters on
+        # this statement, so the LIKE wildcards are single percent signs.)
+        if self._meta_get("routed_seeded") is None:
+            self._exec("""
+                INSERT INTO captioner_routed(asset_id, outcome)
+                SELECT a.id, 'preexisting' FROM asset a
+                JOIN asset_exif ae ON ae."assetId" = a.id
+                WHERE ae.description IS NOT NULL AND btrim(ae.description) <> ''
+                  AND NOT (btrim(ae.description) LIKE '{%' AND btrim(ae.description) LIKE '%}')
+                ON CONFLICT DO NOTHING
+            """)
+            self._meta_set("routed_seeded", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            print("[route] seeded captioner_routed with already-captioned assets", flush=True)
+        # Likewise, only album additions made after this first run count as moves.
+        if self._meta_get("album_member_seeded") is None:
+            self._exec("""
+                INSERT INTO captioner_album_member(album_id, asset_id)
+                SELECT "albumId", "assetId" FROM album_asset ON CONFLICT DO NOTHING
+            """)
+            self._meta_set("album_member_seeded", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            print("[route] seeded album membership snapshot", flush=True)
+
+    def is_routed(self, asset_id: str) -> bool:
+        return bool(self._exec("SELECT 1 FROM captioner_routed WHERE asset_id = %s", (asset_id,)))
+
+    def mark_routed(self, asset_id: str, outcome: str) -> None:
+        self._exec("INSERT INTO captioner_routed(asset_id, outcome) VALUES (%s, %s) "
+                   "ON CONFLICT (asset_id) DO UPDATE SET outcome = EXCLUDED.outcome, routed_at = now()",
+                   (asset_id, outcome))
+        self._exec("DELETE FROM captioner_face_wait WHERE asset_id = %s", (asset_id,))
+
+    def face_status(self, asset_id: str) -> str:
+        """"ready", "timeout" (waited long enough, go ahead), or "wait"."""
+        if self.has_job_status:
+            rows = self._exec("""
+                SELECT (ajs."facesRecognizedAt" IS NOT NULL
+                        AND ajs."facesRecognizedAt" <= now() - make_interval(secs => %s)),
+                       (a."createdAt" <= now() - make_interval(secs => %s))
+                FROM asset a LEFT JOIN asset_job_status ajs ON ajs."assetId" = a.id
+                WHERE a.id = %s
+            """, (FACE_WAIT_GRACE_SECONDS, FACE_WAIT_MAX_SECONDS, asset_id))
+        else:
+            rows = self._exec("""
+                SELECT false, (a."createdAt" <= now() - make_interval(secs => %s))
+                FROM asset a WHERE a.id = %s
+            """, (FACE_WAIT_GRACE_SECONDS, asset_id))
+        if not rows:
+            return "timeout"
+        recognized, timed_out = rows[0]
+        if recognized:
+            return "ready"
+        return "timeout" if timed_out else "wait"
+
+    def defer(self, asset_id: str) -> None:
+        self._exec("INSERT INTO captioner_face_wait(asset_id, next_check) "
+                   "VALUES (%s, now() + make_interval(secs => %s)) "
+                   "ON CONFLICT (asset_id) DO UPDATE SET next_check = EXCLUDED.next_check",
+                   (asset_id, FACE_WAIT_RECHECK_SECONDS))
+
+    def deferred_ids(self) -> set:
+        rows = self._exec("SELECT asset_id::text FROM captioner_face_wait WHERE next_check > now()")
+        return {r[0] for r in rows or []}
+
+    def record_membership(self, album_id: str, asset_id: str) -> None:
+        self._exec("INSERT INTO captioner_album_member(album_id, asset_id) VALUES (%s, %s) "
+                   "ON CONFLICT DO NOTHING", (album_id, asset_id))
+
+    def new_memberships(self) -> List[dict]:
+        """Album memberships that appeared since the last poll (and forget removed ones, so
+        re-adding an asset later counts as a fresh move)."""
+        self._exec("""
+            DELETE FROM captioner_album_member m WHERE NOT EXISTS (
+              SELECT 1 FROM album_asset aa WHERE aa."albumId" = m.album_id AND aa."assetId" = m.asset_id)
+        """)
+        import psycopg2.extras
+        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT aa."albumId"::text AS album_id, aa."assetId"::text AS asset_id,
+                       al."albumName" AS album_name, a."type"::text AS type,
+                       ae.description AS description
+                FROM album_asset aa
+                JOIN album al ON al.id = aa."albumId"
+                JOIN asset a ON a.id = aa."assetId"
+                LEFT JOIN asset_exif ae ON ae."assetId" = a.id
+                LEFT JOIN captioner_album_member m
+                  ON m.album_id = aa."albumId" AND m.asset_id = aa."assetId"
+                WHERE m.album_id IS NULL
+            """)
+            return list(cur.fetchall())
+
+    def person_face_embeddings(self, person_name: str) -> List[List[float]]:
+        deleted = 'AND af."deletedAt" IS NULL' if self.face_has_deleted_at else ""
+        try:
+            rows = self._exec(f"""
+                SELECT fs.embedding::text FROM face_search fs
+                JOIN asset_face af ON af.id = fs."faceId"
+                JOIN person p ON p.id = af."personId"
+                WHERE p.name = %s {deleted}
+            """, (person_name,))
+        except Exception as e:
+            print(f"[route] could not read reference faces for {person_name}: {e}", flush=True)
+            return []
+        out = []
+        for (txt,) in rows or []:
+            try:
+                out.append([float(x) for x in json.loads(txt)])
+            except (ValueError, TypeError):
+                continue
+        print(f"[route] {len(out)} reference face(s) for {person_name}", flush=True)
+        return out
 
 # ----------------------------
 # Main loop
@@ -2241,7 +2845,458 @@ def main():
     else:
         print("[mode] Running in safe API-only mode (no DB access, no custom tables)", flush=True)
 
+    # Routing state lives in Postgres whether or not candidate discovery uses it -- see the
+    # "Upload routing" section. No credentials means no routing, not a crash.
+    state: Optional[RoutingState] = None
+    if ROUTING_ENABLED:
+        try:
+            state_conn = conn if conn is not None else (pg_connect() if PGPASSWORD else None)
+            if state_conn is not None:
+                state = RoutingState(state_conn)
+                print("[route] upload routing and album-move handling enabled", flush=True)
+        except Exception as e:
+            print(f"[route] could not set up routing state: {e}", flush=True)
+        if state is None:
+            print("[route] no Postgres access -- routing disabled, captioning by album only", flush=True)
+
     total_done = 0
+
+    def names_for(albums: List[str], people: List[str]) -> List[str]:
+        """Album identities first (that system predates People tags and its prompts were
+        tuned around it), then any other named People."""
+        names = list(extract_identities_from_albums(albums))
+        seen = {n.lower() for n in names}
+        for name in people:
+            if name.lower() not in seen:
+                seen.add(name.lower())
+                names.append(name)
+        return names
+
+    def finalize_caption(raw_caption: str, mode: str, albums: List[str]) -> Tuple[str, List[str], List[str]]:
+        """Cleanup + identity handling shared by every path. Returns (caption, implied_tags,
+        misfiled_identities); an empty caption means the model produced nothing usable."""
+        caption = clean_caption(raw_caption)
+        if not caption.strip():
+            return "", [], []
+        if mode != "VIDEO-PORN-COMPACT":
+            caption = strip_false_nudity_leaks(caption, albums)
+        if mode == "VIDEO-PORN-COMPACT":
+            # The compact field format has no "the woman"/"she" prose to substitute a
+            # name into, and it deliberately omits any person-reference wording when
+            # the only identified person is Lydia (that's the whole point of skipping
+            # her description) -- running this through the narrative-caption identity
+            # logic would misread that as "nobody depicted" and incorrectly flag her as
+            # misfiled.
+            implied_tags, misfiled_identities = [], []
+        else:
+            caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
+        caption = " ".join(caption.split()).strip()[:MAX_CAPTION_CHARS]
+        return caption, implied_tags, misfiled_identities
+
+    def mark_empty_caption(asset_id: str) -> None:
+        if not USE_API_ONLY:
+            pg_mark_skip(conn, asset_id, "EMPTY_OR_JUNK_CAPTION")
+        print(f"[skip] {asset_id} produced empty/junk caption (marked skip)", flush=True)
+
+    def recaption(
+        asset_id: str,
+        asset_type: str,
+        albums: List[str],
+        prefetched_thumbnail: Optional[Image.Image] = None,
+        prefetched_thumbnail_error: Optional[Exception] = None,
+        exif_make: Optional[str] = None,
+        gen_info: Optional[str] = None,
+        auto_file: bool = True,
+        misfile_cleanup: bool = True,
+    ) -> None:
+        """Caption an asset by the albums it's already in -- the pre-routing behavior, used
+        for everything that isn't a brand-new upload. auto_file=False skips the caption-
+        keyword album filing (furry/lactation/hucow/Camspy); misfile_cleanup=False keeps the
+        "no person in the caption" heuristic from undoing a face-recognition filing."""
+        nonlocal total_done
+        person_names = names_for(albums, get_asset_people_names(asset_id))
+
+        # Computed for every asset type, not just video -- the auto-filing rules below
+        # apply to images too, and non-human content must be excluded from them there
+        # as well.
+        feral = is_feral_album(albums)
+        nonhuman = is_nonhuman_album(albums)
+
+        if asset_type == "VIDEO":
+            dense = is_dense_sampling_album(albums)
+            compilation = is_compilation_album(albums)
+            multiple = is_multiple_creampie_album(albums)
+            raw_caption, mode = caption_video(
+                asset_id, caption_detailed, person_names=person_names, dense=dense,
+                compilation=compilation, feral=feral, multiple=multiple,
+                single=is_single_creampie_album(albums), nonhuman=nonhuman,
+                full_caption=is_full_caption_album(albums),
+                masturbation=is_masturbation_album(albums),
+                categorized=is_categorized_album(albums),
+            )
+        else:
+            if prefetched_thumbnail_error is not None:
+                raise prefetched_thumbnail_error
+            img = prefetched_thumbnail if prefetched_thumbnail is not None else immich_get_thumbnail(asset_id)
+            raw_caption, mode = caption_image(img, person_names=person_names)
+            generate_and_apply_e621_tags(asset_id, img, caption_detailed)
+
+        caption, implied_tags, misfiled_identities = finalize_caption(raw_caption, mode, albums)
+        if not caption:
+            mark_empty_caption(asset_id)
+            return
+
+        # Truncation above applies to the caption alone -- the generation info is
+        # re-attached afterwards so MAX_CAPTION_CHARS can never clip the JSON.
+        ok = immich_update_description(asset_id, compose_description(caption, gen_info))
+        if not ok:
+            print(f"[fail] {asset_id} update failed", flush=True)
+            return
+        total_done += 1
+        alb = ", ".join(albums[:3]) + ("..." if len(albums) > 3 else "")
+        print(f"[ok] {asset_id} [{mode}] albums=[{alb}] => {caption}", flush=True)
+
+        if implied_tags:
+            immich_apply_tags(asset_id, implied_tags)
+
+        if misfiled_identities and misfile_cleanup:
+            for name in misfiled_identities:
+                for album_name in find_albums_matching_identity(albums, name):
+                    album_id = immich_album_id_by_name(album_name)
+                    if album_id:
+                        immich_remove_from_album(asset_id, album_id)
+            immich_unarchive(asset_id)
+            print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
+
+        # "Please categorize" assets are deliberately left exactly as they are --
+        # unfiled, unarchived, and sitting in the main timeline waiting for the human.
+        # Auto-filing or archiving them here would defeat the entire point.
+        if mode == "VIDEO-UNCATEGORIZED":
+            print(f"[parked] {asset_id} awaiting manual categorization", flush=True)
+        elif auto_file:
+            # Single AND Multiple Creampie membership are both purely manual now: the
+            # captioner reports what it detected in the caption ("Separate Creampies |
+            # 1 (~12:02)") but never files the asset into either album, and never
+            # removes it from either. The human reads the caption and sorts.
+            #
+            # Auto-filing into Single Creampie is what put 80 wrongly-classified
+            # videos there -- 56 of them from Bondage Creampie -- because any asset
+            # already sitting in some album skipped the "Please categorize" park and
+            # went straight through detection into filing. Detection is good enough to
+            # inform a decision, not good enough to make one unattended.
+
+            # Feral is the one category that belongs in no additional album at all:
+            # it's a real, non-anthropomorphic animal, the opposite of furry, and its
+            # own feral albums are the whole classification. Everything below is
+            # skipped for it -- anthro, by contrast, is expected to live in Furry Stuff.
+            if not feral:
+                # Membership in an identity album is a deliberate human filing
+                # decision, so don't second-guess it off a caption keyword. Lydia
+                # stylized as a dog captions as "anthropomorphic dog", which would
+                # otherwise sweep that entire album into Furry Stuff and archive it
+                # out of the timeline.
+                if _FURRY_TRIGGER_RE.search(caption) and not extract_identities_from_albums(albums):
+                    immich_add_to_album(asset_id, FURRY_ALBUM_ID)
+                    immich_archive(asset_id)
+
+                if _LACTATION_TRIGGER_RE.search(caption):
+                    immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
+
+                if _HUCOW_TRIGGER_RE.search(caption):
+                    immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
+
+            # Ray-Ban Meta glasses capture belongs in Camspy regardless of what else
+            # it is -- keyed off EXIF make, which the DB/API candidate fetch supplies.
+            if (exif_make or "").strip().lower() == CAMSPY_EXIF_MAKE:
+                immich_add_to_album(asset_id, CAMSPY_ALBUM_ID)
+
+        if STAMP_PORN_CAPTION_DATE and mode == "VIDEO-PORN-COMPACT":
+            immich_set_date_taken_now(asset_id)
+
+    def route_new_asset(
+        asset_id: str,
+        asset_type: str,
+        filename: Optional[str],
+        exif_make: Optional[str],
+        gen_info: Optional[str],
+        thumb: Optional[Image.Image],
+    ) -> Optional[str]:
+        """Walk a brand-new upload through the routing order. Returns the outcome, or None
+        when it's waiting on face recognition and will be picked up again later."""
+        is_video = asset_type == "VIDEO"
+        added_keys: List[str] = []
+
+        def add(key: str) -> None:
+            album_id = album_id_for(key)
+            if not album_id or key in added_keys:
+                return
+            immich_add_to_album(asset_id, album_id)
+            state.record_membership(album_id, asset_id)
+            added_keys.append(key)
+
+        def finish(raw_caption: str, mode: str, outcome: str, archive: bool,
+                   caption_override: Optional[str] = None) -> str:
+            nonlocal total_done
+            albums = refresh_asset_albums(asset_id, [])
+            if caption_override is not None:
+                caption = caption_override
+            else:
+                # Misfile cleanup is deliberately ignored here: every album this path adds
+                # was chosen by looking at the asset, not by a human who might have slipped.
+                caption, _, _ = finalize_caption(raw_caption, mode, albums)
+            if not caption:
+                mark_empty_caption(asset_id)
+            elif immich_update_description(asset_id, compose_description(caption, gen_info)):
+                total_done += 1
+                print(f"[ok] {asset_id} [{mode}] routed={outcome} albums=[{', '.join(albums)}] "
+                      f"archived={archive} => {caption}", flush=True)
+                if STAMP_PORN_CAPTION_DATE and mode == "VIDEO-PORN-COMPACT":
+                    immich_set_date_taken_now(asset_id)
+            else:
+                print(f"[fail] {asset_id} update failed", flush=True)
+                return outcome
+            if archive:
+                immich_archive(asset_id)
+            state.mark_routed(asset_id, outcome)
+            return outcome
+
+        if not is_video and thumb is None:
+            thumb = immich_get_thumbnail(asset_id)
+
+        # 1. CamSpy: Ray-Ban Meta capture, or a SpyPhoto file. Full narrative caption.
+        if is_camspy_upload(exif_make, filename):
+            people = get_asset_people_names(asset_id)
+            add("camspy")
+            if is_video:
+                raw, mode = caption_video(asset_id, caption_detailed, person_names=people, full_caption=True)
+            else:
+                raw, mode = caption_image(thumb, person_names=people)
+            return finish(raw, mode, "camspy", archive=True)
+
+        # 2. One of us? Nothing else happens until Immich's face recognition has had its go.
+        status = state.face_status(asset_id)
+        if status == "wait":
+            state.defer(asset_id)
+            print(f"[route] {asset_id} waiting on face recognition", flush=True)
+            return None
+        if status == "timeout":
+            print(f"[route] {asset_id} face recognition didn't finish in time -- continuing", flush=True)
+        raw_people = get_asset_people_names(asset_id, raw=True)
+        people = [canonical_people_name(n) for n in raw_people]
+        matches = person_albums(raw_people)
+        if matches:
+            for person, album_name, album_id in matches:
+                immich_add_to_album(asset_id, album_id)
+                state.record_membership(album_id, asset_id)
+                print(f"[route] {asset_id} is {person} -> {album_name}", flush=True)
+            albums = refresh_asset_albums(asset_id, [m[1] for m in matches])
+            recaption(asset_id, asset_type, albums, prefetched_thumbnail=thumb,
+                      exif_make=exif_make, gen_info=gen_info, auto_file=False,
+                      misfile_cleanup=False)
+            state.mark_routed(asset_id, "person")
+            return "person"
+
+        video_path = None
+        try:
+            if is_video:
+                fd, video_path = tempfile.mkstemp(suffix=".mp4")
+                os.close(fd)
+                immich_download_original(asset_id, video_path)
+                frames = extract_video_frames(video_path, dense=False)
+                if not frames:
+                    raise RuntimeError("no frames extracted")
+            else:
+                frames = [(0.0, thumb)]
+            triage = _classify_with_prompt([img for _, img in frames], _TRIAGE_PROMPT,
+                                           _parse_triage, caption_detailed, max_new_tokens=40)
+
+            # 3. Anthro. Everything here ends in its regular caption and the archive.
+            if frames_agree(triage, "anthro"):
+                add("furry")
+                if is_video:
+                    add("anthro_video")
+                    if frames_agree(triage, "sex_human_anthro"):
+                        add("human_anthro_video")
+                    if frames_agree(triage, "sex_anthro_anthro"):
+                        add("anthro_sex_video")
+                    albums = refresh_asset_albums(asset_id, [])
+                    raw, mode = caption_video(
+                        asset_id, caption_detailed, person_names=names_for(albums, people),
+                        dense=is_dense_sampling_album(albums), nonhuman=True, categorized=True,
+                        video_path=video_path,
+                    )
+                else:
+                    if frames_agree(triage, "sex_human_anthro"):
+                        add("human_anthro_still")
+                    if frames_agree(triage, "cow"):
+                        add("cow_anthro")
+                    if matches_lydiadog(asset_id, gen_info, raw_people, state):
+                        add("lydia_dog")
+                    albums = refresh_asset_albums(asset_id, [])
+                    raw, mode = caption_image(thumb, person_names=names_for(albums, people))
+                return finish(raw, mode, "anthro", archive=True)
+
+            # 4. Nudity. Without it: the regular caption, left in the timeline, done.
+            nude_rows = [(ts, img) for (ts, img), t in zip(frames, triage) if t["nudity"]]
+            if not nude_rows:
+                if is_video:
+                    raw, mode = caption_video(asset_id, caption_detailed, person_names=people,
+                                              full_caption=True, video_path=video_path)
+                else:
+                    raw, mode = caption_image(thumb, person_names=people)
+                return finish(raw, mode, "clean", archive=False)
+
+            # 5. Porn categories.
+            cats = _classify_with_prompt([img for _, img in _evenly(nude_rows, PORN_PROMPT_MAX_FRAMES)],
+                                         _PORN_CATEGORY_PROMPT, _parse_porn_categories,
+                                         caption_detailed, max_new_tokens=80)
+            solo = (max((c["women"] for c in cats), default=0) == 1
+                    and not frames_agree(cats, "men"))
+            if solo:
+                add("internet_titties")
+                if frames_agree(cats, "masturbating"):
+                    add("masturbation")
+            if frames_agree(cats, "cowprint"):
+                add("hucow")
+            if frames_agree(cats, "lactating"):
+                add("lactation")
+            if frames_agree(cats, "glorywall"):
+                add("glorywall")
+
+            text = filename or ""
+            if is_video:
+                card_frames = extract_frames_at(video_path, TITLECARD_TIMESTAMPS)
+                text += " " + " ".join(ocr_fn(img) for _, img in card_frames + frames)
+            else:
+                text += " " + ocr_fn(thumb)
+            hentaied = frames_agree(cats, "tentacles") or bool(_HENTAIED_TEXT_RE.search(_compact_text(text)))
+
+            if not is_video:
+                if hentaied:
+                    add("hentaied")
+                raw, mode = caption_image(thumb, person_names=people)
+                # A creampie keeps it in the timeline until the human has sorted it.
+                archive = hentaied or (any(k in _PORN_ALBUM_KEYS for k in added_keys)
+                                       and not frames_agree(cats, "vaginal_cum"))
+                return finish(raw, mode, "hentaied" if hentaied else "porn", archive=archive)
+
+            dense_frames = extract_video_frames(video_path, dense=True)
+            signals = _classify_video_frames(dense_frames, caption_detailed)
+            if not any(k == "lactation" for k in added_keys) and frames_agree(signals, "lactating"):
+                add("lactation")
+            masturbation = "masturbation" in added_keys
+
+            def porn_id(count: int = 0, event_times: Optional[List[str]] = None) -> str:
+                return compact_porn_caption(signals, dense_frames, caption_detailed,
+                                            person_names=people, masturbation=masturbation,
+                                            count=count, event_times=event_times)
+
+            if hentaied:
+                add("hentaied")
+                return finish("", "VIDEO-PORN-COMPACT", "hentaied", archive=True,
+                              caption_override=clean_caption(porn_id()))
+
+            studio = match_studio(text)
+            if studio:
+                add(studio)
+                add("multi")
+                count, event_times = count_creampie_events(
+                    [(s["ts"], s["state"], s["partner_visible"]) for s in signals])
+                print(f"[route] {asset_id} studio {studio}: {count} creampie(s)", flush=True)
+                return finish("", "VIDEO-PORN-COMPACT", "studio", archive=True,
+                              caption_override=clean_caption(porn_id(count, event_times)))
+
+            # No cum classification in the caption at upload -- but a creampie parks the
+            # video at "Please Categorize" in the timeline for the human to sort.
+            caption = clean_caption(porn_id())
+            if detect_single_creampie(signals) is not None:
+                if any(s["bound"] for s in signals):
+                    add("bondage_creampie")
+                return finish("", "VIDEO-PORN-COMPACT", "please-categorize", archive=False,
+                              caption_override=with_uncategorized_prefix(caption))
+            archive = any(k in _PORN_ALBUM_KEYS for k in added_keys)
+            return finish("", "VIDEO-PORN-COMPACT", "porn", archive=archive, caption_override=caption)
+        finally:
+            if video_path:
+                try:
+                    os.remove(video_path)
+                except OSError:
+                    pass
+
+    def run_cum_counter(asset_id: str) -> Tuple[int, List[str]]:
+        fd, video_path = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
+        try:
+            immich_download_original(asset_id, video_path)
+            frames = extract_video_frames(video_path, dense=True)
+            if not frames:
+                raise RuntimeError("no frames extracted")
+            signals = _classify_video_frames(frames, caption_detailed)
+            return count_creampie_events([(s["ts"], s["state"], s["partner_visible"]) for s in signals])
+        finally:
+            try:
+                os.remove(video_path)
+            except OSError:
+                pass
+
+    move_attempts: Dict[str, int] = {}
+    last_move_poll = [0.0]
+
+    def handle_album_moves() -> None:
+        """Act on albums the human just filed things into. See the "Upload routing" section."""
+        if state is None or time.time() - last_move_poll[0] < MOVE_POLL_SECONDS:
+            return
+        last_move_poll[0] = time.time()
+        try:
+            rows = state.new_memberships()
+        except Exception as e:
+            print(f"[move] membership poll failed: {e}", flush=True)
+            return
+        if not rows:
+            return
+        multi_id, single_id = album_id_for("multi"), album_id_for("single")
+        by_asset: Dict[str, List[dict]] = {}
+        for row in rows:
+            by_asset.setdefault(row["asset_id"], []).append(row)
+
+        for asset_id, adds in by_asset.items():
+            names = [r["album_name"] or "" for r in adds]
+            to_multi = any(r["album_id"] == multi_id for r in adds)
+            to_single = any(r["album_id"] == single_id for r in adds)
+            to_counted = any(n.strip().startswith(MULTI_EVENT_COUNT_ALBUM_PREFIXES) for n in names)
+            to_porn = any((album_number(n) or "").startswith("200.") for n in names)
+            is_video = (adds[0]["type"] or "").upper() == "VIDEO"
+            caption, gen = split_description(adds[0]["description"])
+            try:
+                if not caption:
+                    # Still waiting for its caption: the normal pass captions it by album
+                    # (and counts creampies for Multiple Creampie), so only the archive
+                    # decision is made here.
+                    if to_multi or to_single:
+                        immich_archive(asset_id)
+                else:
+                    was_parked = has_uncategorized_prefix(caption)
+                    new = strip_uncategorized_prefix(caption)
+                    if (to_multi or to_counted) and is_video:
+                        count, event_times = run_cum_counter(asset_id)
+                        new = with_creampie_count(new, count, event_times)
+                        print(f"[move] {asset_id} CumCounter: {count} creampie(s)", flush=True)
+                    if new != caption:
+                        # An emptied caption (it was nothing but "Please Categorize") puts the
+                        # asset back in the queue, to be captioned by its new album.
+                        immich_update_description(asset_id, compose_description(new, gen))
+                    if to_multi or to_single or (was_parked and to_porn):
+                        immich_archive(asset_id)
+                print(f"[move] {asset_id} added to [{', '.join(names)}] handled", flush=True)
+            except Exception as e:
+                move_attempts[asset_id] = move_attempts.get(asset_id, 0) + 1
+                print(f"[move] {asset_id} failed (attempt {move_attempts[asset_id]}): {e}", flush=True)
+                if move_attempts[asset_id] < MOVE_MAX_ATTEMPTS:
+                    continue
+                print(f"[move] {asset_id} giving up after {MOVE_MAX_ATTEMPTS} attempts", flush=True)
+            move_attempts.pop(asset_id, None)
+            for r in adds:
+                state.record_membership(r["album_id"], asset_id)
 
     def process_candidate(
         asset_id: str,
@@ -2251,8 +3306,8 @@ def main():
         prefetched_thumbnail_error: Optional[Exception] = None,
         exif_make: Optional[str] = None,
         gen_info: Optional[str] = None,
+        filename: Optional[str] = None,
     ) -> None:
-        nonlocal total_done
         try:
             if asset_type == "VIDEO" and not CAPTION_VIDEOS:
                 if not USE_API_ONLY:
@@ -2263,130 +3318,14 @@ def main():
             # Re-read album membership as late as possible -- see refresh_asset_albums().
             albums = refresh_asset_albums(asset_id, albums)
 
-            # Merge both identity sources: album-based (curated, mostly the adult-content
-            # roster) and Immich's own People face-tags (covers ordinary photos that never
-            # go near a named album). Album names take precedence in ordering since that
-            # system predates this one and its captions/prompts were tuned around it.
-            person_names = list(extract_identities_from_albums(albums))
-            seen_names = {n.lower() for n in person_names}
-            for name in get_asset_people_names(asset_id):
-                if name.lower() not in seen_names:
-                    seen_names.add(name.lower())
-                    person_names.append(name)
-
-            # Computed for every asset type, not just video -- the auto-filing rules below
-            # apply to images too, and non-human content must be excluded from them there
-            # as well.
-            feral = is_feral_album(albums)
-            nonhuman = is_nonhuman_album(albums)
-
-            if asset_type == "VIDEO":
-                dense = is_dense_sampling_album(albums)
-                compilation = is_compilation_album(albums)
-                multiple = is_multiple_creampie_album(albums)
-                raw_caption, mode = caption_video(
-                    asset_id, caption_detailed, person_names=person_names, dense=dense,
-                    compilation=compilation, feral=feral, multiple=multiple,
-                    single=is_single_creampie_album(albums), nonhuman=nonhuman,
-                    full_caption=is_full_caption_album(albums),
-                    masturbation=is_masturbation_album(albums),
-                    categorized=is_categorized_album(albums),
-                )
-            else:
+            if state is not None and not albums and not state.is_routed(asset_id):
                 if prefetched_thumbnail_error is not None:
                     raise prefetched_thumbnail_error
-                img = prefetched_thumbnail if prefetched_thumbnail is not None else immich_get_thumbnail(asset_id)
-                raw_caption, mode = caption_image(img, person_names=person_names)
-                generate_and_apply_e621_tags(asset_id, img, caption_detailed)
-
-            caption = clean_caption(raw_caption)
-            if not caption.strip():
-                if not USE_API_ONLY:
-                    pg_mark_skip(conn, asset_id, "EMPTY_OR_JUNK_CAPTION")
-                print(f"[skip] {asset_id} produced empty/junk caption (marked skip)", flush=True)
-                return
-
-            if mode != "VIDEO-PORN-COMPACT":
-                caption = strip_false_nudity_leaks(caption, albums)
-
-            if mode == "VIDEO-PORN-COMPACT":
-                # The compact field format has no "the woman"/"she" prose to substitute a
-                # name into, and it deliberately omits any person-reference wording when
-                # the only identified person is Lydia (that's the whole point of skipping
-                # her description) -- running this through the narrative-caption identity
-                # logic would misread that as "nobody depicted" and incorrectly flag her as
-                # misfiled.
-                implied_tags, misfiled_identities = [], []
+                route_new_asset(asset_id, asset_type, filename, exif_make, gen_info,
+                                prefetched_thumbnail)
             else:
-                caption, implied_tags, misfiled_identities = apply_identity_overrides(caption, albums)
-            caption = " ".join(caption.split()).strip()[:MAX_CAPTION_CHARS]
-
-            # Truncation above applies to the caption alone -- the generation info is
-            # re-attached afterwards so MAX_CAPTION_CHARS can never clip the JSON.
-            ok = immich_update_description(asset_id, compose_description(caption, gen_info))
-            if ok:
-                total_done += 1
-                alb = ", ".join(albums[:3]) + ("..." if len(albums) > 3 else "")
-                print(f"[ok] {asset_id} [{mode}] albums=[{alb}] => {caption}", flush=True)
-
-                if implied_tags:
-                    immich_apply_tags(asset_id, implied_tags)
-
-                if misfiled_identities:
-                    for name in misfiled_identities:
-                        for album_name in find_albums_matching_identity(albums, name):
-                            album_id = immich_album_id_by_name(album_name)
-                            if album_id:
-                                immich_remove_from_album(asset_id, album_id)
-                    immich_unarchive(asset_id)
-                    print(f"[misfile] {asset_id} not actually {'/'.join(misfiled_identities)} -- removed from identity album(s), unarchived", flush=True)
-
-                # "Please categorize" assets are deliberately left exactly as they are --
-                # unfiled, unarchived, and sitting in the main timeline waiting for the human.
-                # Auto-filing or archiving them here would defeat the entire point.
-                if mode == "VIDEO-UNCATEGORIZED":
-                    print(f"[parked] {asset_id} awaiting manual categorization", flush=True)
-                else:
-                    # Single AND Multiple Creampie membership are both purely manual now: the
-                    # captioner reports what it detected in the caption ("Separate Creampies |
-                    # 1 (~12:02)") but never files the asset into either album, and never
-                    # removes it from either. The human reads the caption and sorts.
-                    #
-                    # Auto-filing into Single Creampie is what put 80 wrongly-classified
-                    # videos there -- 56 of them from Bondage Creampie -- because any asset
-                    # already sitting in some album skipped the "Please categorize" park and
-                    # went straight through detection into filing. Detection is good enough to
-                    # inform a decision, not good enough to make one unattended.
-
-                    # Feral is the one category that belongs in no additional album at all:
-                    # it's a real, non-anthropomorphic animal, the opposite of furry, and its
-                    # own feral albums are the whole classification. Everything below is
-                    # skipped for it -- anthro, by contrast, is expected to live in Furry Stuff.
-                    if not feral:
-                        # Membership in an identity album is a deliberate human filing
-                        # decision, so don't second-guess it off a caption keyword. Lydia
-                        # stylized as a dog captions as "anthropomorphic dog", which would
-                        # otherwise sweep that entire album into Furry Stuff and archive it
-                        # out of the timeline.
-                        if _FURRY_TRIGGER_RE.search(caption) and not extract_identities_from_albums(albums):
-                            immich_add_to_album(asset_id, FURRY_ALBUM_ID)
-                            immich_archive(asset_id)
-
-                        if _LACTATION_TRIGGER_RE.search(caption):
-                            immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
-
-                        if _HUCOW_TRIGGER_RE.search(caption):
-                            immich_add_to_album(asset_id, HUCOW_ALBUM_ID)
-
-                    # Ray-Ban Meta glasses capture belongs in Camspy regardless of what else
-                    # it is -- keyed off EXIF make, which the DB/API candidate fetch supplies.
-                    if (exif_make or "").strip().lower() == CAMSPY_EXIF_MAKE:
-                        immich_add_to_album(asset_id, CAMSPY_ALBUM_ID)
-
-                if STAMP_PORN_CAPTION_DATE and mode == "VIDEO-PORN-COMPACT":
-                    immich_set_date_taken_now(asset_id)
-            else:
-                print(f"[fail] {asset_id} update failed", flush=True)
+                recaption(asset_id, asset_type, albums, prefetched_thumbnail,
+                          prefetched_thumbnail_error, exif_make, gen_info)
 
             time.sleep(SLEEP_SECONDS)
 
@@ -2426,6 +3365,7 @@ def main():
 
     if USE_API_ONLY:
         while True:
+            handle_album_moves()
             candidates = get_uncaptioned_candidates_api()
             if not candidates:
                 print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
@@ -2433,8 +3373,12 @@ def main():
                 continue
 
             print(f"[batch] {len(candidates)} candidates", flush=True)
+            deferred = state.deferred_ids() if state is not None else set()
             for row in candidates:
+                handle_album_moves()
                 asset_id = row.get("id")
+                if asset_id in deferred:
+                    continue
                 asset_type = row.get("type", "UNKNOWN").upper()  # API may not have type; fallback
                 # Albums are read inside process_candidate (refresh_asset_albums), as late
                 # as possible, so there's nothing to fetch here.
@@ -2443,6 +3387,7 @@ def main():
                     asset_id, asset_type, [],
                     exif_make=exif_info.get("make"),
                     gen_info=split_description(exif_info.get("description"))[1],
+                    filename=row.get("originalFileName"),
                 )
 
             print(f"[progress] total updated this run: {total_done}", flush=True)
@@ -2468,7 +3413,8 @@ def main():
         try:
             while True:
                 try:
-                    rows = pg_fetch_candidates(worker_conn, DB_REPRIORITIZE_BATCH)
+                    rows = pg_fetch_candidates(worker_conn, DB_REPRIORITIZE_BATCH,
+                                               exclude_face_wait=state is not None)
                 except Exception as e:
                     prefetch_q.put(("fetch_error", e))
                     time.sleep(1.0)
@@ -2503,7 +3449,8 @@ def main():
 
                     prefetch_q.put(("row", (asset_id, asset_type, albums, thumb, thumb_err,
                                             row.get("exif_make"),
-                                            split_description(row.get("description"))[1])))
+                                            split_description(row.get("description"))[1],
+                                            row.get("original_file_name"))))
         finally:
             worker_conn.close()
 
@@ -2511,6 +3458,7 @@ def main():
     print("[prefetch] background lookahead thread started", flush=True)
 
     while True:
+        handle_album_moves()
         kind, payload = prefetch_q.get()
 
         if kind == "fetch_error":
@@ -2522,11 +3470,11 @@ def main():
             print(f"[done] No more blank assets. Sleeping {IDLE_SLEEP_SECONDS}s and rechecking...", flush=True)
             continue
 
-        asset_id, asset_type, albums, thumb, thumb_err, exif_make, gen_info = payload
+        asset_id, asset_type, albums, thumb, thumb_err, exif_make, gen_info, filename = payload
         try:
             process_candidate(asset_id, asset_type, albums, prefetched_thumbnail=thumb,
                               prefetched_thumbnail_error=thumb_err, exif_make=exif_make,
-                              gen_info=gen_info)
+                              gen_info=gen_info, filename=filename)
         finally:
             with in_flight_lock:
                 in_flight_ids.discard(asset_id)
