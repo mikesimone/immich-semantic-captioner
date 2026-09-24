@@ -29,6 +29,29 @@ wait_for_healthy() {
     return 1
 }
 
+# Reconcile actual state once before trusting the event stream. The loop below is purely
+# event-driven, and on a cold boot docker.service auto-starts immich_server (restart:
+# always) at roughly the moment this unit comes up -- if that 'start' event lands before
+# `docker events` has attached, it is missed permanently. That matters because the
+# captioner runs restart: unless-stopped, so a container that was explicitly stopped (by
+# wopr-shutdown, or by hand) is NOT restarted by the daemon at boot: it would sit dead
+# until a human noticed the queue had stopped draining. Checking the pair's real state at
+# startup closes the race without changing the steady-state behavior.
+prime_captioner() {
+    local immich_running captioner_running
+    immich_running="$(docker inspect -f '{{.State.Running}}' "$IMMICH_CONTAINER" 2>/dev/null || echo false)"
+    captioner_running="$(docker inspect -f '{{.State.Running}}' "$CAPTIONER_CONTAINER" 2>/dev/null || echo missing)"
+    if [[ "$immich_running" == "true" && "$captioner_running" == "false" ]]; then
+        log "startup reconcile: $IMMICH_CONTAINER is up but $CAPTIONER_CONTAINER is down"
+        wait_for_healthy || log "$IMMICH_CONTAINER not healthy within ${HEALTH_TIMEOUT_SECONDS}s; starting $CAPTIONER_CONTAINER anyway"
+        docker start "$CAPTIONER_CONTAINER" >/dev/null \
+            && log "started $CAPTIONER_CONTAINER" \
+            || log "WARNING: could not start $CAPTIONER_CONTAINER"
+    fi
+}
+
+prime_captioner
+
 log "Watching for '$IMMICH_CONTAINER' restarts to bounce '$CAPTIONER_CONTAINER'..."
 
 docker events --filter "container=$IMMICH_CONTAINER" --filter "event=start" --format '{{.Time}}' |
