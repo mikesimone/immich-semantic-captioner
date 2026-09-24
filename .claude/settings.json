@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(journalctl -u *)",
+      "Bash(journalctl --since *)",
+      "Bash(journalctl -t *)",
+      "Bash(journalctl -p *)",
+      "Bash(systemctl status *)",
+      "Bash(systemctl list-timers *)",
+      "Bash(systemctl list-units *)",
+      "Bash(systemctl is-active *)",
+      "Bash(systemctl is-enabled *)",
+      "Bash(systemctl show *)",
+      "Bash(systemctl cat *)",
+      "Bash(nvidia-smi)",
+      "Bash(nvidia-smi --query-gpu=*)",
+      "Bash(nvidia-smi -q *)",
+      "Bash(dpkg -l)",
+      "Bash(dpkg -l *)"
+    ]
+  }
+}
