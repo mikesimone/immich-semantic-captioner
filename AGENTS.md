@@ -8,6 +8,7 @@
 - API-only mode is the recommended/default integration; direct Postgres mode exists for faster candidate discovery and is more schema-sensitive.
 - GPU acceleration is preferred for the production library.
 - Secrets and deployment-specific `.env` values remain outside Git.
+- On WOPR, `IMMICH_API_KEY` and `IMMICH_DB_PASSWORD` live in `~/.api-keys`, not `.env`; `docker-compose.yml` hardcodes the in-network addresses (`http://immich_server:2283`, `immich_postgres`) behind `CAPTIONER_*` overrides. Recreate the container with `scripts/compose.sh`, never with a URL from the host shell (`~/.api-keys` exports a host-side `IMMICH_URL`).
 - WOPR deployment truth and host paths are documented in `mikesimone/Environment`.
 
 ## Important invariants
