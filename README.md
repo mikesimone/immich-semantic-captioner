@@ -36,18 +36,31 @@ cd immich-semantic-captioner
 cp .env.example .env
 ```
 
+Secrets are not kept in `.env`. Export them in the shell that runs compose
+(on WOPR they live in `~/.api-keys`, which `scripts/compose.sh` sources):
+
+- `IMMICH_API_KEY`
+- `IMMICH_DB_PASSWORD` (Immich's `DB_PASSWORD`; passed to the container as `PGPASSWORD`)
+
+Addresses default to the Immich docker network (`http://immich_server:2283`,
+`immich_postgres:5432`, db `immich`, user `postgres`). Override them in `.env`
+only if your stack differs, using `CAPTIONER_IMMICH_URL`, `CAPTIONER_PGHOST`,
+`CAPTIONER_PGPORT`, `CAPTIONER_PGDATABASE`, `CAPTIONER_PGUSER`. The prefix keeps a
+host-side `IMMICH_URL` in your shell from leaking into the container.
+
 Edit `.env` and set:
 
-- `IMMICH_URL`
-- `IMMICH_API_KEY`
-- Postgres settings (`PGHOST`, `PGPASSWORD`, etc.)
 - USE_API_ONLY (default true): Set to 'true' for fully API-supported operation (recommended for most users). Set to 'false' only if you're comfortable with direct Postgres access and need maximum speed on large libraries.
 
 ### 3) Run (GPU mode)
 
 ```
-docker compose up -d immich-captioner
+scripts/compose.sh up -d immich-captioner
 ```
+
+`scripts/compose.sh` sources `~/.api-keys` and runs `docker compose`; a bare
+`docker compose` works too if the secrets are already exported, and fails with
+a clear error if they are not.
 
 ### 4) Watch logs
 
@@ -74,8 +87,8 @@ CUDA_BASE_IMAGE=ubuntu:24.04
 3) Rebuild:
 
 ```
-docker compose build --no-cache immich-captioner
-docker compose up -d immich-captioner
+scripts/compose.sh build --no-cache immich-captioner
+scripts/compose.sh up -d immich-captioner
 ```
 
 ---
