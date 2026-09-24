@@ -135,6 +135,8 @@ don't count.
 - Added to `200.001.000 - Single Creampie`: archived.
 - Added to any `100.000.x` album: the CumCounter runs, and archive state is left alone.
 - A `Please Categorize` caption loses that prefix once the asset is filed anywhere.
+- Added to any `300.006.x` (Lydia Dog) album: the still gets the `Lydia Dog` Person tag on its
+  main face, or on the whole frame when no face is found.
 
 Routing albums are found by number (see `_DEFAULT_ROUTING_ALBUM_NUMBERS` in `captioner.py`,
 overridable with `ROUTING_ALBUM_NUMBERS`), so the text after the number can change freely.
