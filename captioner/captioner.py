@@ -127,9 +127,12 @@ MULTI_CREAMPIE_PREFIX = os.environ.get("MULTI_CREAMPIE_PREFIX", "200.000.")
 # confabulation rather than the real thing.
 CREAMPIE_EARLIEST_FRACTION = float(os.environ.get("CREAMPIE_EARLIEST_FRACTION", "0.5"))
 
-# Multi-creampie counting (see count_creampie_events): a return to the CUM state this many
-# seconds after the previous counted event is a new creampie.
+# Multi-creampie counting (see count_creampie_events): a return to the CUM state is a new
+# creampie once this much time has passed since the previous counted one. The gap scales
+# with the video's length (CREAMPIE_GAP_FRACTION of it), clamped to the min/max below.
 CREAMPIE_MIN_GAP_SECONDS = float(os.environ.get("CREAMPIE_MIN_GAP_SECONDS", "8"))
+CREAMPIE_MAX_GAP_SECONDS = float(os.environ.get("CREAMPIE_MAX_GAP_SECONDS", "90"))
+CREAMPIE_GAP_FRACTION = float(os.environ.get("CREAMPIE_GAP_FRACTION", "0.1"))
 # The one album whose members are guaranteed to hold multiples, so its count never reads
 # below MULTI_CREAMPIE_MIN_COUNT. Other 200.000.x albums (studios etc.) aren't floored.
 GUARANTEED_MULTI_ALBUM_NUMBER = os.environ.get("GUARANTEED_MULTI_ALBUM_NUMBER", "200.000.000")
@@ -1399,8 +1402,8 @@ def count_creampie_events(
     # 100.000.x counted album), so this errs on the high side on purpose (Mike, 2026-09-25:
     # "since we are ONLY running the counter on the multi folder, we can be more lenient").
     #
-    # A new event is every switch back into CUM at least min_gap_seconds after the previous
-    # counted event. Per-frame traces on 2026-09-25 showed why the earlier rules undercounted:
+    # A new event is every switch back into CUM at least the gap after the previous counted
+    # event. The gap is a tenth of the video's length, clamped to 8-90 s. Per-frame traces on 2026-09-25 showed why the earlier rules undercounted:
     # - The old "she was alone in some frame since the last event" gate almost never opened.
     #   PARTNER came back Y on 262 of 270 frames, and a 34-minute gangbang could never count
     #   past 1.
@@ -1411,10 +1414,19 @@ def count_creampie_events(
     # available proxy for a finish. A dedicated yes/no semen check was tried as a second pass
     # and never said yes on a real one, so it isn't used.
     #
+    # Scored on 2026-09-25 against Mike's hand counts for eight Multiple Creampie videos
+    # (1-9 minutes long, 2-7 creampies each). A fixed 8 s gap was off by 24 creampies in
+    # total, mostly from one creampie flickering in and out of view every few seconds and
+    # being counted again each time. A fixed 30 s gap was off by 15, because it merged the
+    # four real ones in the 60-second clip. Scaling the gap to a tenth of the length was off
+    # by 8. It's still a proxy; the temporal classifier in porn-classifier is the real fix.
+    #
     # min_count floors the result for albums that guarantee multiples (only 200.000.000
     # Multiple Creampie does). The timestamps list stays as detected.
     if min_gap_seconds is None:
-        min_gap_seconds = CREAMPIE_MIN_GAP_SECONDS
+        length = frame_states[-1][0] if frame_states else 0.0
+        min_gap_seconds = min(CREAMPIE_MAX_GAP_SECONDS,
+                              max(CREAMPIE_MIN_GAP_SECONDS, length * CREAMPIE_GAP_FRACTION))
     event_starts: List[float] = []
     was_cum = False
     for ts, state, _partner_visible in frame_states:

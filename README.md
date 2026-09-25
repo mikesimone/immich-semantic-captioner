@@ -149,8 +149,9 @@ don't count.
 - Added to any `100.000.x` album: the CumCounter runs, and archive state is left alone.
 
 The CumCounter samples the video densely and counts a new creampie each time the frames return
-to "not inserted, genitals in view" at least `CREAMPIE_MIN_GAP_SECONDS` (default 8) after the
-previous one. It deliberately errs high, because it only runs on content filed as multiples.
+to "not inserted, genitals in view" a gap after the previous one. The gap is
+`CREAMPIE_GAP_FRACTION` (default 0.1) of the video's length, clamped between
+`CREAMPIE_MIN_GAP_SECONDS` (8) and `CREAMPIE_MAX_GAP_SECONDS` (90). It deliberately errs high, because it only runs on content filed as multiples.
 Anything in `200.000.000` never reads below `MULTI_CREAMPIE_MIN_COUNT` (default 2).
 - A `Please Categorize` caption loses that prefix once the asset is filed anywhere.
 - Added to any `300.006.x` (Lydia Dog) album: the still gets the `Lydia Dog` Person tag on its
