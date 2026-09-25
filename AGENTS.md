@@ -16,8 +16,9 @@
 - Avoid permanent skips for transient Immich thumbnail/API failures; retry behavior matters.
 - Direct database access must remain optional and clearly separated from supported API behavior.
 - Commands that wipe/reset descriptions are destructive and must remain conspicuously documented.
-- Upload routing (new uploads filed by a fixed order: CamSpy, known person, anthro, nudity, porn categories) and album-move handling (CumCounter on Multiple Creampie / 100.000.x) are specified by the owner; see README "Upload Routing and Album Moves". Album membership by a human stays authoritative, and person filing comes only from Immich face recognition, plus the owner-requested LydiaDog face match for anthro stills.
+- Upload routing (new uploads filed by a fixed order: CamSpy, known person, anthro, nudity, porn categories) and album-move handling (creampie counts on Multiple Creampie / 100.000.x) are specified by the owner; see README "Upload Routing and Album Moves". Album membership by a human stays authoritative, and person filing comes only from Immich face recognition, plus the owner-requested LydiaDog face match for anthro stills.
 - Routing state lives in `captioner_*` tables in the Immich database and needs PG credentials even in API-only mode; without them routing is off.
 
 ## Working rules
 Read `README.md` before changing caption selection, identity handling, skip/retry behavior, or deployment. Preserve API compatibility where possible. Never commit Immich API keys or database credentials. Update docs when runtime model, identity configuration, schema interaction, or deployment behavior changes.
+- Creampie counting comes only from the video scorer (`CREAMPIE_SCORER_URL`, porn-classifier `model/serve.py`). The frame-based counter was removed at the owner's instruction on 2026-09-25 and must not come back as a fallback; if the scorer can't answer, the asset is deferred and retried.
