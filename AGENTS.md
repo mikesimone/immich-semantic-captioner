@@ -22,3 +22,4 @@
 ## Working rules
 Read `README.md` before changing caption selection, identity handling, skip/retry behavior, or deployment. Preserve API compatibility where possible. Never commit Immich API keys or database credentials. Update docs when runtime model, identity configuration, schema interaction, or deployment behavior changes.
 - Creampie counting comes only from the video scorer (`CREAMPIE_SCORER_URL`, porn-classifier `model/serve.py`). The frame-based counter was removed at the owner's instruction on 2026-09-25 and must not come back as a fallback; if the scorer can't answer, the asset is deferred and retried.
+- Hand-timed creampie counts (`captioner_hand_counted`) are authoritative; never overwrite them with a model count.
