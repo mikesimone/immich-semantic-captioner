@@ -153,6 +153,10 @@ to "not inserted, genitals in view" a gap after the previous one. The gap is
 `CREAMPIE_GAP_FRACTION` (default 0.1) of the video's length, clamped between
 `CREAMPIE_MIN_GAP_SECONDS` (8) and `CREAMPIE_MAX_GAP_SECONDS` (90). It deliberately errs high, because it only runs on content filed as multiples.
 Anything in `200.000.000` never reads below `MULTI_CREAMPIE_MIN_COUNT` (default 2).
+
+When `CREAMPIE_SCORER_URL` is set, counting asks that service first. It's porn-classifier's
+`model/serve.py`, a V-JEPA 2 model that watches 4-second clips instead of single frames.
+If the service is unset, unreachable, busy or times out, the frame counter above is used.
 - A `Please Categorize` caption loses that prefix once the asset is filed anywhere.
 - Added to any `300.006.x` (Lydia Dog) album: the still gets the `Lydia Dog` Person tag on its
   main face, or on the whole frame when no face is found.
