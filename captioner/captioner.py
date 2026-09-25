@@ -145,6 +145,10 @@ MULTI_CREAMPIE_MIN_COUNT = int(os.environ.get("MULTI_CREAMPIE_MIN_COUNT", "2"))
 CREAMPIE_SCORER_URL = os.environ.get("CREAMPIE_SCORER_URL", "").rstrip("/")
 CREAMPIE_SCORER_TOKEN = os.environ.get("CREAMPIE_SCORER_TOKEN", "")
 CREAMPIE_SCORER_TIMEOUT = float(os.environ.get("CREAMPIE_SCORER_TIMEOUT", "3600"))
+# Anton's firewall silently drops connections when the scorer isn't listening, so without a
+# short connect timeout every Multiple Creampie video stalls ~2 min (kernel SYN retries)
+# before falling back whenever Anton is off.
+CREAMPIE_SCORER_CONNECT_TIMEOUT = float(os.environ.get("CREAMPIE_SCORER_CONNECT_TIMEOUT", "10"))
 # Which albums count as "the human already filed this", so it gets captioned instead of
 # parked at "Please categorize". Empty (the default) means ANY album membership qualifies,
 # which is the intent: freshly-imported porn lands in no album and needs sorting, while
@@ -1453,7 +1457,8 @@ def score_creampies_remote(asset_id: str) -> Optional[Tuple[int, List[str]]]:
     headers = {"Authorization": f"Bearer {CREAMPIE_SCORER_TOKEN}"} if CREAMPIE_SCORER_TOKEN else {}
     try:
         r = requests.post(f"{CREAMPIE_SCORER_URL}/score", json={"asset_id": asset_id},
-                          headers=headers, timeout=CREAMPIE_SCORER_TIMEOUT)
+                          headers=headers,
+                          timeout=(CREAMPIE_SCORER_CONNECT_TIMEOUT, CREAMPIE_SCORER_TIMEOUT))
         if r.status_code != 200:
             print(f"[scorer] {asset_id} HTTP {r.status_code}: {r.text[:200]} -- using frame counter",
                   flush=True)
