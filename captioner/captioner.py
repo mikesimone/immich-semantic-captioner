@@ -137,6 +137,14 @@ CREAMPIE_GAP_FRACTION = float(os.environ.get("CREAMPIE_GAP_FRACTION", "0.1"))
 # below MULTI_CREAMPIE_MIN_COUNT. Other 200.000.x albums (studios etc.) aren't floored.
 GUARANTEED_MULTI_ALBUM_NUMBER = os.environ.get("GUARANTEED_MULTI_ALBUM_NUMBER", "200.000.000")
 MULTI_CREAMPIE_MIN_COUNT = int(os.environ.get("MULTI_CREAMPIE_MIN_COUNT", "2"))
+# Optional remote creampie scorer: porn-classifier's model/serve.py (V-JEPA 2 clip model),
+# which watches 4-second clips rather than single frames. On eight hand-timed videos its
+# detections were real 79% of the time against 33% for the frame counter. When set, every
+# multi-creampie count asks it first and falls back to the frame counter on any failure
+# (unset, unreachable, busy GPU, timeout).
+CREAMPIE_SCORER_URL = os.environ.get("CREAMPIE_SCORER_URL", "").rstrip("/")
+CREAMPIE_SCORER_TOKEN = os.environ.get("CREAMPIE_SCORER_TOKEN", "")
+CREAMPIE_SCORER_TIMEOUT = float(os.environ.get("CREAMPIE_SCORER_TIMEOUT", "3600"))
 # Which albums count as "the human already filed this", so it gets captioned instead of
 # parked at "Please categorize". Empty (the default) means ANY album membership qualifies,
 # which is the intent: freshly-imported porn lands in no album and needs sorting, while
@@ -1438,6 +1446,38 @@ def count_creampie_events(
             was_cum = False
     return max(len(event_starts), min_count), [format_ts(ts) for ts in event_starts]
 
+def score_creampies_remote(asset_id: str) -> Optional[Tuple[int, List[str]]]:
+    """(count, event times) from the remote video scorer, or None to use the frame counter."""
+    if not CREAMPIE_SCORER_URL:
+        return None
+    headers = {"Authorization": f"Bearer {CREAMPIE_SCORER_TOKEN}"} if CREAMPIE_SCORER_TOKEN else {}
+    try:
+        r = requests.post(f"{CREAMPIE_SCORER_URL}/score", json={"asset_id": asset_id},
+                          headers=headers, timeout=CREAMPIE_SCORER_TIMEOUT)
+        if r.status_code != 200:
+            print(f"[scorer] {asset_id} HTTP {r.status_code}: {r.text[:200]} -- using frame counter",
+                  flush=True)
+            return None
+        d = r.json()
+        times = [format_ts(float(t)) for t in d.get("times", [])]
+        print(f"[scorer] {asset_id} {int(d['count'])} creampie(s) {times} in {d.get('seconds')}s",
+              flush=True)
+        return int(d["count"]), times
+    except Exception as e:
+        print(f"[scorer] {asset_id} failed: {e} -- using frame counter", flush=True)
+        return None
+
+def count_multi_creampies(
+    asset_id: str,
+    frame_states: List[Tuple[float, str, bool]],
+    min_count: int = 0,
+) -> Tuple[int, List[str]]:
+    """Multi-creampie count: the remote video scorer if it answers, else the frame counter."""
+    remote = score_creampies_remote(asset_id)
+    if remote is not None:
+        return max(remote[0], min_count), remote[1]
+    return count_creampie_events(frame_states, min_count=min_count)
+
 # Video porn no longer gets a scene-by-scene narrative -- just a compact structured
 # summary. This cheap per-frame classifier drives that: nudity presence (to decide porn
 # vs. not), the existing INSERTED/CUM state machine (for creampie counting), plus bondage
@@ -1871,8 +1911,8 @@ def caption_video(
             cum_ts = detect_single_creampie(signals)
             count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
         else:
-            count, event_times = count_creampie_events(
-                [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
+            count, event_times = count_multi_creampies(
+                asset_id, [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
                 min_count=MULTI_CREAMPIE_MIN_COUNT if guaranteed_multi else 0,
             )
         caption = compact_porn_caption(
@@ -3335,8 +3375,8 @@ def main():
             if studio:
                 add(studio)
                 add("multi")
-                count, event_times = count_creampie_events(
-                    [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
+                count, event_times = count_multi_creampies(
+                    asset_id, [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
                     min_count=MULTI_CREAMPIE_MIN_COUNT)
                 print(f"[route] {asset_id} studio {studio}: {count} creampie(s)", flush=True)
                 return finish("", "VIDEO-PORN-COMPACT", "studio", archive=True,
@@ -3360,6 +3400,9 @@ def main():
                     pass
 
     def run_cum_counter(asset_id: str, min_count: int = 0) -> Tuple[int, List[str]]:
+        remote = score_creampies_remote(asset_id)
+        if remote is not None:
+            return max(remote[0], min_count), remote[1]
         fd, video_path = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
         try:
