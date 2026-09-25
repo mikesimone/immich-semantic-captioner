@@ -126,6 +126,14 @@ MULTI_CREAMPIE_PREFIX = os.environ.get("MULTI_CREAMPIE_PREFIX", "200.000.")
 # through the video -- the creampie ends the scene, so an early one is a classifier
 # confabulation rather than the real thing.
 CREAMPIE_EARLIEST_FRACTION = float(os.environ.get("CREAMPIE_EARLIEST_FRACTION", "0.5"))
+
+# Multi-creampie counting (see count_creampie_events): a return to the CUM state this many
+# seconds after the previous counted event is a new creampie.
+CREAMPIE_MIN_GAP_SECONDS = float(os.environ.get("CREAMPIE_MIN_GAP_SECONDS", "8"))
+# The one album whose members are guaranteed to hold multiples, so its count never reads
+# below MULTI_CREAMPIE_MIN_COUNT. Other 200.000.x albums (studios etc.) aren't floored.
+GUARANTEED_MULTI_ALBUM_NUMBER = os.environ.get("GUARANTEED_MULTI_ALBUM_NUMBER", "200.000.000")
+MULTI_CREAMPIE_MIN_COUNT = int(os.environ.get("MULTI_CREAMPIE_MIN_COUNT", "2"))
 # Which albums count as "the human already filed this", so it gets captioned instead of
 # parked at "Please categorize". Empty (the default) means ANY album membership qualifies,
 # which is the intent: freshly-imported porn lands in no album and needs sorting, while
@@ -1219,6 +1227,10 @@ def is_multiple_creampie_album(albums: List[str]) -> bool:
     # multi", so event counting runs for all of them.
     return any((album or "").strip().startswith(MULTI_CREAMPIE_PREFIX) for album in (albums or []))
 
+def is_guaranteed_multi_album(albums: List[str]) -> bool:
+    want = normalize_album_number(GUARANTEED_MULTI_ALBUM_NUMBER)
+    return any(normalize_album_number(album_number(a) or "") == want for a in (albums or []))
+
 # Albums that are ordinary life footage filed under a porn-ish heading -- Ray-Ban Meta
 # glasses capture, mostly. Nudity may appear, but these want the full narrative caption
 # rather than the compact porn field format.
@@ -1376,55 +1388,43 @@ def format_ts(seconds: float) -> str:
 
 def count_creampie_events(
     frame_states: List[Tuple[float, str, bool]],
-    min_gap_seconds: float = 60.0,
+    min_gap_seconds: Optional[float] = None,
+    min_count: int = 0,
 ) -> Tuple[int, List[str]]:
-    # frame_states is already in chronological sample order: (timestamp, STATE, partner_visible)
-    # per frame, where STATE is one of INSERTED/CUM/NONE and partner_visible says whether a
-    # male partner is anywhere in frame with her right now. A single still frame can't show
-    # the *instant* of pulling out -- that's motion, not a static visual state -- so we don't
-    # ask the model to recognize that moment directly, and counting every fresh "cum visible"
-    # sighting as its own event doesn't work either: cum can go in and out of view purely from
-    # a camera angle or position change with no new ejaculation involved.
+    # frame_states is already in chronological sample order: (timestamp, STATE,
+    # partner_visible) per frame, where STATE is one of INSERTED/CUM/NONE. partner_visible is
+    # kept in the tuple for callers but no longer used.
     #
-    # Only reached for content manually placed in Multiple Creampie and not also in a
-    # compilation album (compilation membership skips creampie detection entirely -- see
-    # caption_video) -- i.e. genuinely "one woman, multiple creampies in one continuous
-    # encounter," never a compilation of different women cut together.
+    # Only reached for content filed as multiples (Multiple Creampie, a studio album, or a
+    # 100.000.x counted album), so this errs on the high side on purpose (Mike, 2026-09-25:
+    # "since we are ONLY running the counter on the multi folder, we can be more lenient").
     #
-    # "Multiple creampies" specifically means multiple DIFFERENT men, not just multiple times
-    # cum became visible -- ordinary continued sex after the real creampie (same man, still in
-    # frame) is completely normal and must not count as a second round, no matter how many
-    # times the existing load becomes visible again during it. A single "partner absent" frame
-    # alone isn't reliable evidence he actually left, though -- porn cinematography constantly
-    # crops the man's body out of frame for close-ups even mid-scene with the same guy the
-    # whole time (confirmed in testing: using that signal alone made a known-bad case *worse*,
-    # 12 events up to 18). So a new event requires BOTH real elapsed time (min_gap_seconds)
-    # since the last counted event AND at least one sampled frame where she was genuinely alone
-    # during that gap -- either condition alone was too permissive on its own.
-    event_starts_raw: List[float] = []
+    # A new event is every switch back into CUM at least min_gap_seconds after the previous
+    # counted event. Per-frame traces on 2026-09-25 showed why the earlier rules undercounted:
+    # - The old "she was alone in some frame since the last event" gate almost never opened.
+    #   PARTNER came back Y on 262 of 270 frames, and a 34-minute gangbang could never count
+    #   past 1.
+    # - The old 60 s minimum gap made four real creampies at 0:12, 0:21, 0:39 and 0:58 in a
+    #   60-second clip count as 1. Eight seconds still separates 0:12 from 0:21.
+    # CUMLOC comes back VAGINA on nearly every frame, so CUM effectively means "not inserted
+    # right now with her genitals in view". Each return to it after penetration is the best
+    # available proxy for a finish. A dedicated yes/no semen check was tried as a second pass
+    # and never said yes on a real one, so it isn't used.
+    #
+    # min_count floors the result for albums that guarantee multiples (only 200.000.000
+    # Multiple Creampie does). The timestamps list stays as detected.
+    if min_gap_seconds is None:
+        min_gap_seconds = CREAMPIE_MIN_GAP_SECONDS
+    event_starts: List[float] = []
     was_cum = False
-    seen_alone_since_last_event = False
-    for ts, state, partner_visible in frame_states:
-        if not partner_visible:
-            seen_alone_since_last_event = True
-        if state == "INSERTED":
-            was_cum = False
-        elif state == "CUM":
-            if not was_cum:
-                had_scene_break = (
-                    not event_starts_raw
-                    or (
-                        seen_alone_since_last_event
-                        and (ts - event_starts_raw[-1]) >= min_gap_seconds
-                    )
-                )
-                if had_scene_break:
-                    event_starts_raw.append(ts)
-                    seen_alone_since_last_event = False
+    for ts, state, _partner_visible in frame_states:
+        if state == "CUM":
+            if not was_cum and (not event_starts or ts - event_starts[-1] >= min_gap_seconds):
+                event_starts.append(ts)
             was_cum = True
         else:
             was_cum = False
-    return len(event_starts_raw), [format_ts(ts) for ts in event_starts_raw]
+    return max(len(event_starts), min_count), [format_ts(ts) for ts in event_starts]
 
 # Video porn no longer gets a scene-by-scene narrative -- just a compact structured
 # summary. This cheap per-frame classifier drives that: nudity presence (to decide porn
@@ -1749,6 +1749,7 @@ def caption_video(
     compilation: bool = False,
     feral: bool = False,
     multiple: bool = False,
+    guaranteed_multi: bool = False,
     single: bool = False,
     nonhuman: bool = False,
     full_caption: bool = False,
@@ -1859,7 +1860,8 @@ def caption_video(
             count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
         else:
             count, event_times = count_creampie_events(
-                [(s["ts"], s["state"], s["partner_visible"]) for s in signals]
+                [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
+                min_count=MULTI_CREAMPIE_MIN_COUNT if guaranteed_multi else 0,
             )
         caption = compact_porn_caption(
             signals, frames, caption_detailed, person_names=person_names,
@@ -3041,6 +3043,7 @@ def main():
             raw_caption, mode = caption_video(
                 asset_id, caption_detailed, person_names=person_names, dense=dense,
                 compilation=compilation, feral=feral, multiple=multiple,
+                guaranteed_multi=is_guaranteed_multi_album(albums),
                 single=is_single_creampie_album(albums), nonhuman=nonhuman,
                 full_caption=is_full_caption_album(albums),
                 masturbation=is_masturbation_album(albums),
@@ -3317,7 +3320,8 @@ def main():
                 add(studio)
                 add("multi")
                 count, event_times = count_creampie_events(
-                    [(s["ts"], s["state"], s["partner_visible"]) for s in signals])
+                    [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
+                    min_count=MULTI_CREAMPIE_MIN_COUNT)
                 print(f"[route] {asset_id} studio {studio}: {count} creampie(s)", flush=True)
                 return finish("", "VIDEO-PORN-COMPACT", "studio", archive=True,
                               caption_override=clean_caption(porn_id(count, event_times)))
@@ -3339,7 +3343,7 @@ def main():
                 except OSError:
                     pass
 
-    def run_cum_counter(asset_id: str) -> Tuple[int, List[str]]:
+    def run_cum_counter(asset_id: str, min_count: int = 0) -> Tuple[int, List[str]]:
         fd, video_path = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
         try:
@@ -3348,7 +3352,8 @@ def main():
             if not frames:
                 raise RuntimeError("no frames extracted")
             signals = _classify_video_frames(frames, caption_detailed)
-            return count_creampie_events([(s["ts"], s["state"], s["partner_visible"]) for s in signals])
+            return count_creampie_events(
+                [(s["ts"], s["state"], s["partner_visible"]) for s in signals], min_count=min_count)
         finally:
             try:
                 os.remove(video_path)
@@ -3398,7 +3403,8 @@ def main():
                     was_parked = has_uncategorized_prefix(caption)
                     new = strip_uncategorized_prefix(caption)
                     if (to_multi or to_counted) and is_video:
-                        count, event_times = run_cum_counter(asset_id)
+                        count, event_times = run_cum_counter(
+                            asset_id, min_count=MULTI_CREAMPIE_MIN_COUNT if to_multi else 0)
                         new = with_creampie_count(new, count, event_times)
                         print(f"[move] {asset_id} CumCounter: {count} creampie(s)", flush=True)
                     if new != caption:
