@@ -134,8 +134,8 @@ stop processing; a stopped asset still gets its normal caption so it isn't re-qu
    `200.000.006`; tentacles or the Hentaied logo go to `200.000.008` (archive and stop). Videos
    get the compact porn-ID caption with no creampie count. A studio logo, title card, or filename
    (Slutwife Jessica/Marion, Puta Locura, Creampie Squad, Gangbang/5 Guy Creampie) files the video
-   into that studio album plus `200.000.000`, runs the CumCounter, and archives it. Otherwise a
-   detected creampie gets the caption `Please Categorize | ...`. It stays in the timeline, and if
+   into that studio album plus `200.000.000`, counts creampies with the scorer, and archives it. Otherwise a
+   creampie found by the scorer gets the caption `Please Categorize | ...`. It stays in the timeline, and if
    she's restrained it also goes to `200.002.000 - Bondage Creampie`. Anything else filed into a
    porn album is archived, unless a still shows cum in or leaking from a vagina.
 
@@ -143,20 +143,21 @@ stop processing; a stopped asset still gets its normal caption so it isn't re-qu
 Additions the captioner makes itself, and everything already filed when routing first starts,
 don't count.
 
-- Added to `200.000.000 - Multiple Creampie`: the CumCounter replaces the `Separate Creampies`
+- Added to `200.000.000 - Multiple Creampie`: the scorer's count replaces the `Separate Creampies`
   field and keeps the other fields. The asset is archived.
 - Added to `200.001.000 - Single Creampie`: archived.
-- Added to any `100.000.x` album: the CumCounter runs, and archive state is left alone.
+- Added to any `100.000.x` album: the scorer counts creampies, and archive state is left alone.
 
-The CumCounter samples the video densely and counts a new creampie each time the frames return
-to "not inserted, genitals in view" a gap after the previous one. The gap is
-`CREAMPIE_GAP_FRACTION` (default 0.1) of the video's length, clamped between
-`CREAMPIE_MIN_GAP_SECONDS` (8) and `CREAMPIE_MAX_GAP_SECONDS` (90). It deliberately errs high, because it only runs on content filed as multiples.
-Anything in `200.000.000` never reads below `MULTI_CREAMPIE_MIN_COUNT` (default 2).
+**Creampie counting is done only by the creampie scorer** (`CREAMPIE_SCORER_URL`):
+porn-classifier's `model/serve.py`, a V-JEPA 2 model that watches 4-second clips instead of single
+frames, running as the `creampie_scorer` container next to the captioner on WOPR. The old
+per-frame counter was removed (2026-09-25): it never worked. If the scorer is unset, unreachable
+or times out, nothing is guessed. The video is left uncaptioned, deferred for
+`CREAMPIE_SCORER_RETRY_SECONDS` (default 600), and retried; a pending album move is retried on
+the next poll. Anything in `200.000.000` never reads below `MULTI_CREAMPIE_MIN_COUNT` (default 2).
+`200.001.000 - Single Creampie` needs no scorer: it's captioned `Separate Creampies | 1` with no
+timestamp. When both want the GPU, the scorer waits for free memory rather than refusing.
 
-When `CREAMPIE_SCORER_URL` is set, counting asks that service first. It's porn-classifier's
-`model/serve.py`, a V-JEPA 2 model that watches 4-second clips instead of single frames.
-If the service is unset, unreachable, busy or times out, the frame counter above is used.
 - A `Please Categorize` caption loses that prefix once the asset is filed anywhere.
 - Added to any `300.006.x` (Lydia Dog) album: the still gets the `Lydia Dog` Person tag on its
   main face, or on the whole frame when no face is found.
