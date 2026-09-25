@@ -147,6 +147,11 @@ don't count.
   field and keeps the other fields. The asset is archived.
 - Added to `200.001.000 - Single Creampie`: archived.
 - Added to any `100.000.x` album: the CumCounter runs, and archive state is left alone.
+
+The CumCounter samples the video densely and counts a new creampie each time the frames return
+to "not inserted, genitals in view" at least `CREAMPIE_MIN_GAP_SECONDS` (default 8) after the
+previous one. It deliberately errs high, because it only runs on content filed as multiples.
+Anything in `200.000.000` never reads below `MULTI_CREAMPIE_MIN_COUNT` (default 2).
 - A `Please Categorize` caption loses that prefix once the asset is filed anywhere.
 - Added to any `300.006.x` (Lydia Dog) album: the still gets the `Lydia Dog` Person tag on its
   main face, or on the whole frame when no face is found.
