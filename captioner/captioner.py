@@ -122,26 +122,16 @@ HUCOW_ALBUM_ID = os.environ.get("HUCOW_ALBUM_ID", "d526cf69-8aed-4fdc-b93e-6daca
 # being guessed at.
 MULTI_CREAMPIE_PREFIX = os.environ.get("MULTI_CREAMPIE_PREFIX", "200.000.")
 
-# For single-creampie detection, ignore any CUM sighting before this fraction of the way
-# through the video -- the creampie ends the scene, so an early one is a classifier
-# confabulation rather than the real thing.
-CREAMPIE_EARLIEST_FRACTION = float(os.environ.get("CREAMPIE_EARLIEST_FRACTION", "0.5"))
-
-# Multi-creampie counting (see count_creampie_events): a return to the CUM state is a new
-# creampie once this much time has passed since the previous counted one. The gap scales
-# with the video's length (CREAMPIE_GAP_FRACTION of it), clamped to the min/max below.
-CREAMPIE_MIN_GAP_SECONDS = float(os.environ.get("CREAMPIE_MIN_GAP_SECONDS", "8"))
-CREAMPIE_MAX_GAP_SECONDS = float(os.environ.get("CREAMPIE_MAX_GAP_SECONDS", "90"))
-CREAMPIE_GAP_FRACTION = float(os.environ.get("CREAMPIE_GAP_FRACTION", "0.1"))
 # The one album whose members are guaranteed to hold multiples, so its count never reads
 # below MULTI_CREAMPIE_MIN_COUNT. Other 200.000.x albums (studios etc.) aren't floored.
 GUARANTEED_MULTI_ALBUM_NUMBER = os.environ.get("GUARANTEED_MULTI_ALBUM_NUMBER", "200.000.000")
 MULTI_CREAMPIE_MIN_COUNT = int(os.environ.get("MULTI_CREAMPIE_MIN_COUNT", "2"))
-# Optional remote creampie scorer: porn-classifier's model/serve.py (V-JEPA 2 clip model),
-# which watches 4-second clips rather than single frames. On eight hand-timed videos its
-# detections were real 79% of the time against 33% for the frame counter. When set, every
-# multi-creampie count asks it first and falls back to the frame counter on any failure
-# (unset, unreachable, busy GPU, timeout).
+# Creampie counting is done ONLY by the remote video scorer: porn-classifier's
+# model/serve.py (V-JEPA 2 clip model, which watches 4-second clips rather than single frames;
+# the creampie_scorer container on WOPR). The old per-frame counter was removed on Mike's
+# instruction (2026-09-25: "doesn't work, hasn't worked, isn't going to work"). If the scorer
+# is unset, unreachable, busy or times out, the video is NOT captioned with a guess -- it's
+# deferred CREAMPIE_SCORER_RETRY_SECONDS and retried (see ScorerUnavailable).
 CREAMPIE_SCORER_URL = os.environ.get("CREAMPIE_SCORER_URL", "").rstrip("/")
 CREAMPIE_SCORER_TOKEN = os.environ.get("CREAMPIE_SCORER_TOKEN", "")
 CREAMPIE_SCORER_TIMEOUT = float(os.environ.get("CREAMPIE_SCORER_TIMEOUT", "3600"))
@@ -149,6 +139,7 @@ CREAMPIE_SCORER_TIMEOUT = float(os.environ.get("CREAMPIE_SCORER_TIMEOUT", "3600"
 # short connect timeout every Multiple Creampie video stalls ~2 min (kernel SYN retries)
 # before falling back whenever Anton is off.
 CREAMPIE_SCORER_CONNECT_TIMEOUT = float(os.environ.get("CREAMPIE_SCORER_CONNECT_TIMEOUT", "10"))
+CREAMPIE_SCORER_RETRY_SECONDS = int(os.environ.get("CREAMPIE_SCORER_RETRY_SECONDS", "600"))
 # Which albums count as "the human already filed this", so it gets captioned instead of
 # parked at "Please categorize". Empty (the default) means ANY album membership qualifies,
 # which is the intent: freshly-imported porn lands in no album and needs sorting, while
@@ -1210,10 +1201,8 @@ def is_dense_sampling_album(albums: List[str]) -> bool:
             return True
     return False
 
-# Compilation-style albums (e.g. "Creampie Compilation") are the one place multiple
-# distinct creampies genuinely happen within seconds of each other -- everywhere else that
-# pattern is classifier jitter, so the minimum-gap dedup in count_creampie_events gets
-# disabled only for these.
+# Compilation-style albums (e.g. "Creampie Compilation") cut between different women, so
+# there's no single creampie count to report; caption_video skips counting for them.
 def is_compilation_album(albums: List[str]) -> bool:
     return any("compilation" in (album or "").lower() for album in (albums or []))
 
@@ -1401,91 +1390,38 @@ def format_ts(seconds: float) -> str:
     s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
 
-def count_creampie_events(
-    frame_states: List[Tuple[float, str, bool]],
-    min_gap_seconds: Optional[float] = None,
-    min_count: int = 0,
-) -> Tuple[int, List[str]]:
-    # frame_states is already in chronological sample order: (timestamp, STATE,
-    # partner_visible) per frame, where STATE is one of INSERTED/CUM/NONE. partner_visible is
-    # kept in the tuple for callers but no longer used.
-    #
-    # Only reached for content filed as multiples (Multiple Creampie, a studio album, or a
-    # 100.000.x counted album), so this errs on the high side on purpose (Mike, 2026-09-25:
-    # "since we are ONLY running the counter on the multi folder, we can be more lenient").
-    #
-    # A new event is every switch back into CUM at least the gap after the previous counted
-    # event. The gap is a tenth of the video's length, clamped to 8-90 s. Per-frame traces on 2026-09-25 showed why the earlier rules undercounted:
-    # - The old "she was alone in some frame since the last event" gate almost never opened.
-    #   PARTNER came back Y on 262 of 270 frames, and a 34-minute gangbang could never count
-    #   past 1.
-    # - The old 60 s minimum gap made four real creampies at 0:12, 0:21, 0:39 and 0:58 in a
-    #   60-second clip count as 1. Eight seconds still separates 0:12 from 0:21.
-    # CUMLOC comes back VAGINA on nearly every frame, so CUM effectively means "not inserted
-    # right now with her genitals in view". Each return to it after penetration is the best
-    # available proxy for a finish. A dedicated yes/no semen check was tried as a second pass
-    # and never said yes on a real one, so it isn't used.
-    #
-    # Scored on 2026-09-25 against Mike's hand counts for eight Multiple Creampie videos
-    # (1-9 minutes long, 2-7 creampies each). A fixed 8 s gap was off by 24 creampies in
-    # total, mostly from one creampie flickering in and out of view every few seconds and
-    # being counted again each time. A fixed 30 s gap was off by 15, because it merged the
-    # four real ones in the 60-second clip. Scaling the gap to a tenth of the length was off
-    # by 8. It's still a proxy; the temporal classifier in porn-classifier is the real fix.
-    #
-    # min_count floors the result for albums that guarantee multiples (only 200.000.000
-    # Multiple Creampie does). The timestamps list stays as detected.
-    if min_gap_seconds is None:
-        length = frame_states[-1][0] if frame_states else 0.0
-        min_gap_seconds = min(CREAMPIE_MAX_GAP_SECONDS,
-                              max(CREAMPIE_MIN_GAP_SECONDS, length * CREAMPIE_GAP_FRACTION))
-    event_starts: List[float] = []
-    was_cum = False
-    for ts, state, _partner_visible in frame_states:
-        if state == "CUM":
-            if not was_cum and (not event_starts or ts - event_starts[-1] >= min_gap_seconds):
-                event_starts.append(ts)
-            was_cum = True
-        else:
-            was_cum = False
-    return max(len(event_starts), min_count), [format_ts(ts) for ts in event_starts]
+class ScorerUnavailable(Exception):
+    """The creampie scorer couldn't answer; the caller defers the asset instead of guessing."""
 
-def score_creampies_remote(asset_id: str) -> Optional[Tuple[int, List[str]]]:
-    """(count, event times) from the remote video scorer, or None to use the frame counter."""
+
+def score_creampies(asset_id: str) -> Tuple[int, List[str]]:
+    """(count, event times "mm:ss") from the creampie scorer. Raises ScorerUnavailable."""
     if not CREAMPIE_SCORER_URL:
-        return None
+        raise ScorerUnavailable("CREAMPIE_SCORER_URL is not set")
     headers = {"Authorization": f"Bearer {CREAMPIE_SCORER_TOKEN}"} if CREAMPIE_SCORER_TOKEN else {}
     try:
         r = requests.post(f"{CREAMPIE_SCORER_URL}/score", json={"asset_id": asset_id},
                           headers=headers,
                           timeout=(CREAMPIE_SCORER_CONNECT_TIMEOUT, CREAMPIE_SCORER_TIMEOUT))
-        if r.status_code != 200:
-            print(f"[scorer] {asset_id} HTTP {r.status_code}: {r.text[:200]} -- using frame counter",
-                  flush=True)
-            return None
-        d = r.json()
-        times = [format_ts(float(t)) for t in d.get("times", [])]
-        print(f"[scorer] {asset_id} {int(d['count'])} creampie(s) {times} in {d.get('seconds')}s",
-              flush=True)
-        return int(d["count"]), times
     except Exception as e:
-        print(f"[scorer] {asset_id} failed: {e} -- using frame counter", flush=True)
-        return None
+        raise ScorerUnavailable(str(e)) from e
+    if r.status_code != 200:
+        raise ScorerUnavailable(f"HTTP {r.status_code}: {r.text[:200]}")
+    d = r.json()
+    times = [format_ts(float(t)) for t in d.get("times", [])]
+    print(f"[scorer] {asset_id} {int(d['count'])} creampie(s) {times} in {d.get('seconds')}s",
+          flush=True)
+    return int(d["count"]), times
 
-def count_multi_creampies(
-    asset_id: str,
-    frame_states: List[Tuple[float, str, bool]],
-    min_count: int = 0,
-) -> Tuple[int, List[str]]:
-    """Multi-creampie count: the remote video scorer if it answers, else the frame counter."""
-    remote = score_creampies_remote(asset_id)
-    if remote is not None:
-        return max(remote[0], min_count), remote[1]
-    return count_creampie_events(frame_states, min_count=min_count)
+
+def count_multi_creampies(asset_id: str, min_count: int = 0) -> Tuple[int, List[str]]:
+    """Multi-creampie count from the scorer, floored at min_count. Raises ScorerUnavailable."""
+    count, times = score_creampies(asset_id)
+    return max(count, min_count), times
 
 # Video porn no longer gets a scene-by-scene narrative -- just a compact structured
 # summary. This cheap per-frame classifier drives that: nudity presence (to decide porn
-# vs. not), the existing INSERTED/CUM state machine (for creampie counting), plus bondage
+# vs. not; its INSERTED/CUM answers also count as nudity evidence), plus bondage
 # and real-animal-interspecies presence, all in one small batched pass per frame.
 _VIDEO_SIGNAL_PROMPT = (
     "Look at this single video frame. Respond with ONLY the following, nothing else -- no "
@@ -1710,25 +1646,6 @@ def _parse_person_desc(text: str) -> Tuple[List[str], List[str], List[str]]:
         ages.append(age)
     return breasts, races, ages
 
-def detect_single_creampie(signals: List[dict]) -> Optional[float]:
-    """Timestamp of the one creampie in a video's dense signals, or None. See the reasoning
-    in caption_video() where this is called for the at-most-one-creampie case."""
-    last_ts = signals[-1]["ts"] if signals else 0.0
-    earliest_plausible = last_ts * CREAMPIE_EARLIEST_FRACTION
-
-    cum_ts = None
-    seen_insertion = False
-    seen_partner = False
-    for s in signals:
-        if s["partner_visible"]:
-            seen_partner = True
-        if s["state"] == "INSERTED":
-            seen_insertion = True
-        elif (s["state"] == "CUM" and seen_insertion and seen_partner
-              and s["ts"] >= earliest_plausible):
-            cum_ts = s["ts"]
-    return cum_ts
-
 def compact_porn_caption(
     signals: List[dict],
     frames: List[Tuple[float, Image.Image]],
@@ -1776,7 +1693,7 @@ def compact_porn_caption(
     # comma-separated blob is meaningless to re-read weeks later.
     fields: List[Tuple[str, str]] = []
     if count >= 1:
-        fields.append(("Separate Creampies", f"{count} (~{', '.join(event_times)})"))
+        fields.append(("Separate Creampies", f"{count} (~{', '.join(event_times)})" if event_times else str(count)))
     if breasts:
         fields.append(("Breast Size", ", ".join(breasts)))
     if races:
@@ -1852,7 +1769,7 @@ def caption_video(
         if not categorized:
             return UNCATEGORIZED_CAPTION, "VIDEO-UNCATEGORIZED"
 
-        # Porn: make sure creampie counting, bondage, and interspecies detection cover the
+        # Porn: make sure bondage and interspecies detection cover the
         # whole runtime, not just this sampling pass -- re-scan with full dense/uniform
         # coverage if the initial pass wasn't already dense (mirrors the old cross-listed
         # creampie re-scan trick, just triggered by the NUDITY signal instead of a text
@@ -1886,39 +1803,15 @@ def caption_video(
             # unconditionally, regardless of Multiple Creampie placement.
             count, event_times = 0, []
         elif not multiple:
-            # Assume at most one creampie for anything not already manually placed in the
-            # Multiple Creampie album (feral overrides even that placement) -- just detect
-            # whether one happened at all, don't try to count how many. An isolated CUM
-            # reading with no INSERTED evidence anywhere earlier in the video is much more
-            # likely a misclassified non-sexual frame than a real creampie -- confirmed in
-            # testing, a fully-clothed dialogue scene at the start of a video was confidently
-            # (and repeatably, under greedy decoding) misread as CUM, while the real creampie
-            # much later sat inside an actual cluster of INSERTED/CUM readings. Requiring a
-            # prior INSERTED sighting filters out the isolated false positives without
-            # needing the CUM reading itself to ever be more reliable.
-            #
-            # Also require a partner to have been seen at some point -- INSERTED alone isn't
-            # enough evidence, since it fires on toy penetration too, and solo masturbation
-            # can't produce a real creampie no matter how wet things get (confirmed: a solo
-            # video with no partner in any frame still got a creampie detected).
-            #
-            # Take the LAST qualifying sighting, not the first: in a real single-creampie
-            # video, the creampie itself is near the end (guys stop after they cum), so the
-            # latest CUM reading with insertion evidence behind it is the best estimate of
-            # the real moment, and it also naturally loses to any earlier isolated false
-            # positive if a later, better-supported reading exists.
-            #
-            # For the same reason, ignore sightings in the opening stretch of the video
-            # entirely. The per-frame classifier does confabulate -- observed a fully-clothed
-            # setup scene one minute into a twenty-minute video answering GENITALS: Y,
-            # CUMLOC: VAGINA -- and an early "creampie" is essentially always one of those,
-            # because the scene hasn't happened yet.
-            cum_ts = detect_single_creampie(signals)
-            count, event_times = (1, [format_ts(cum_ts)]) if cum_ts is not None else (0, [])
+            # Filed as Single Creampie: the human already decided it's exactly one. The
+            # per-frame guess at *when* it happened was unreliable and is gone, so the
+            # count carries no timestamp.
+            count, event_times = 1, []
         else:
+            # Filed as multiples: the video scorer counts them. Raises ScorerUnavailable
+            # (asset deferred, retried later) rather than falling back to a guess.
             count, event_times = count_multi_creampies(
-                asset_id, [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
-                min_count=MULTI_CREAMPIE_MIN_COUNT if guaranteed_multi else 0,
+                asset_id, min_count=MULTI_CREAMPIE_MIN_COUNT if guaranteed_multi else 0,
             )
         caption = compact_porn_caption(
             signals, frames, caption_detailed, person_names=person_names,
@@ -2551,7 +2444,7 @@ def with_creampie_count(caption: str, count: int, event_times: List[str]) -> str
     rest = " | ".join(p for p in parts if p)
     if count < 1:
         return rest
-    field = f"Separate Creampies | {count} (~{', '.join(event_times)})"
+    field = f"Separate Creampies | {count} (~{', '.join(event_times)})" if event_times else f"Separate Creampies | {count}"
     return f"{field} | {rest}" if rest else field
 
 # ---- Classifier prompts for routing ----
@@ -2937,11 +2830,11 @@ class RoutingState:
             return "ready"
         return "timeout" if timed_out else "wait"
 
-    def defer(self, asset_id: str) -> None:
+    def defer(self, asset_id: str, seconds: Optional[int] = None) -> None:
         self._exec("INSERT INTO captioner_face_wait(asset_id, next_check) "
                    "VALUES (%s, now() + make_interval(secs => %s)) "
                    "ON CONFLICT (asset_id) DO UPDATE SET next_check = EXCLUDED.next_check",
-                   (asset_id, FACE_WAIT_RECHECK_SECONDS))
+                   (asset_id, seconds if seconds is not None else FACE_WAIT_RECHECK_SECONDS))
 
     def deferred_ids(self) -> set:
         rows = self._exec("SELECT asset_id::text FROM captioner_face_wait WHERE next_check > now()")
@@ -3380,17 +3273,16 @@ def main():
             if studio:
                 add(studio)
                 add("multi")
-                count, event_times = count_multi_creampies(
-                    asset_id, [(s["ts"], s["state"], s["partner_visible"]) for s in signals],
-                    min_count=MULTI_CREAMPIE_MIN_COUNT)
+                count, event_times = count_multi_creampies(asset_id, min_count=MULTI_CREAMPIE_MIN_COUNT)
                 print(f"[route] {asset_id} studio {studio}: {count} creampie(s)", flush=True)
                 return finish("", "VIDEO-PORN-COMPACT", "studio", archive=True,
                               caption_override=clean_caption(porn_id(count, event_times)))
 
-            # No cum classification in the caption at upload -- but a creampie parks the
-            # video at "Please Categorize" in the timeline for the human to sort.
+            # No cum classification in the caption at upload -- but a creampie (per the video
+            # scorer; ScorerUnavailable defers the upload) parks the video at "Please
+            # Categorize" in the timeline for the human to sort, never archived unsorted.
             caption = clean_caption(porn_id())
-            if detect_single_creampie(signals) is not None:
+            if score_creampies(asset_id)[0] > 0:
                 if any(s["bound"] for s in signals):
                     add("bondage_creampie")
                 return finish("", "VIDEO-PORN-COMPACT", "please-categorize", archive=False,
@@ -3403,26 +3295,6 @@ def main():
                     os.remove(video_path)
                 except OSError:
                     pass
-
-    def run_cum_counter(asset_id: str, min_count: int = 0) -> Tuple[int, List[str]]:
-        remote = score_creampies_remote(asset_id)
-        if remote is not None:
-            return max(remote[0], min_count), remote[1]
-        fd, video_path = tempfile.mkstemp(suffix=".mp4")
-        os.close(fd)
-        try:
-            immich_download_original(asset_id, video_path)
-            frames = extract_video_frames(video_path, dense=True)
-            if not frames:
-                raise RuntimeError("no frames extracted")
-            signals = _classify_video_frames(frames, caption_detailed)
-            return count_creampie_events(
-                [(s["ts"], s["state"], s["partner_visible"]) for s in signals], min_count=min_count)
-        finally:
-            try:
-                os.remove(video_path)
-            except OSError:
-                pass
 
     move_attempts: Dict[str, int] = {}
     last_move_poll = [0.0]
@@ -3467,7 +3339,7 @@ def main():
                     was_parked = has_uncategorized_prefix(caption)
                     new = strip_uncategorized_prefix(caption)
                     if (to_multi or to_counted) and is_video:
-                        count, event_times = run_cum_counter(
+                        count, event_times = count_multi_creampies(
                             asset_id, min_count=MULTI_CREAMPIE_MIN_COUNT if to_multi else 0)
                         new = with_creampie_count(new, count, event_times)
                         print(f"[move] {asset_id} CumCounter: {count} creampie(s)", flush=True)
@@ -3478,6 +3350,11 @@ def main():
                     if to_multi or to_single or (was_parked and to_porn):
                         immich_archive(asset_id)
                 print(f"[move] {asset_id} added to [{', '.join(names)}] handled", flush=True)
+            except ScorerUnavailable as e:
+                # Not the move's fault: leave the membership unrecorded so the next poll
+                # retries it, without using up its attempts.
+                print(f"[move] {asset_id} waiting for the creampie scorer: {e}", flush=True)
+                continue
             except Exception as e:
                 move_attempts[asset_id] = move_attempts.get(asset_id, 0) + 1
                 print(f"[move] {asset_id} failed (attempt {move_attempts[asset_id]}): {e}", flush=True)
@@ -3518,6 +3395,16 @@ def main():
                           prefetched_thumbnail_error, exif_make, gen_info)
 
             time.sleep(SLEEP_SECONDS)
+
+        except ScorerUnavailable as e:
+            # No guessing: leave it uncaptioned and try again later. The face-wait deferral
+            # table keeps it out of the candidate queue meanwhile, so other assets proceed.
+            print(f"[scorer] {asset_id} unavailable ({e}); deferring {CREAMPIE_SCORER_RETRY_SECONDS}s",
+                  flush=True)
+            if state is not None:
+                state.defer(asset_id, CREAMPIE_SCORER_RETRY_SECONDS)
+            else:
+                time.sleep(30)
 
         except ThumbnailNotFound as e:
             if not USE_API_ONLY:
