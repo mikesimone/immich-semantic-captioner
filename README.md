@@ -155,6 +155,9 @@ per-frame counter was removed (2026-09-25): it never worked. If the scorer is un
 or times out, nothing is guessed. The video is left uncaptioned, deferred for
 `CREAMPIE_SCORER_RETRY_SECONDS` (default 600), and retried; a pending album move is retried on
 the next poll. Anything in `200.000.000` never reads below `MULTI_CREAMPIE_MIN_COUNT` (default 2).
+Counts Mike timed by hand live in the `captioner_hand_counted` table (asset id + creampie start
+seconds) and always win: any count (queue, album move, studio routing) for those assets returns the
+hand count, never floored and never re-scored. Add a row there to lock a video's count.
 `200.001.000 - Single Creampie` needs no scorer: it's captioned `Separate Creampies | 1` with no
 timestamp. When both want the GPU, the scorer waits for free memory rather than refusing.
 
