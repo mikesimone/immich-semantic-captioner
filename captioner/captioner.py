@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 import queue
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 from PIL import Image
@@ -1414,8 +1414,35 @@ def score_creampies(asset_id: str) -> Tuple[int, List[str]]:
     return int(d["count"]), times
 
 
+# Creampie counts Mike timed by hand (captioner_hand_counted). They always win over the scorer
+# and are never floored, so no recount, re-caption or album move can overwrite them. The table
+# is re-read at most every HAND_COUNT_REFRESH_SECONDS through _hand_count_loader, which main()
+# points at RoutingState.hand_counts (no Postgres -> no lock, scorer only).
+HAND_COUNT_REFRESH_SECONDS = 60
+_hand_counts: Dict[str, Tuple[int, List[str]]] = {}
+_hand_counts_loaded_at = [0.0]
+_hand_count_loader: List[Optional[Callable[[], Dict[str, Tuple[int, List[str]]]]]] = [None]
+
+
+def hand_count(asset_id: str) -> Optional[Tuple[int, List[str]]]:
+    loader = _hand_count_loader[0]
+    if loader is not None and time.time() - _hand_counts_loaded_at[0] >= HAND_COUNT_REFRESH_SECONDS:
+        try:
+            _hand_counts.clear()
+            _hand_counts.update(loader())
+            _hand_counts_loaded_at[0] = time.time()
+        except Exception as e:
+            print(f"[hand] could not read captioner_hand_counted: {e}", flush=True)
+    return _hand_counts.get(str(asset_id))
+
+
 def count_multi_creampies(asset_id: str, min_count: int = 0) -> Tuple[int, List[str]]:
-    """Multi-creampie count from the scorer, floored at min_count. Raises ScorerUnavailable."""
+    """Multi-creampie count: Mike's hand count if he timed it, else the scorer floored at
+    min_count. Raises ScorerUnavailable."""
+    hc = hand_count(asset_id)
+    if hc is not None:
+        print(f"[hand] {asset_id} hand-counted: {hc[0]} creampie(s) {hc[1]}", flush=True)
+        return hc
     count, times = score_creampies(asset_id)
     return max(count, min_count), times
 
@@ -2773,6 +2800,9 @@ class RoutingState:
               asset_id uuid PRIMARY KEY, next_check timestamptz NOT NULL);
             CREATE TABLE IF NOT EXISTS captioner_album_member (
               album_id uuid NOT NULL, asset_id uuid NOT NULL, PRIMARY KEY (album_id, asset_id));
+            CREATE TABLE IF NOT EXISTS captioner_hand_counted (
+              asset_id uuid PRIMARY KEY, creampie_times_seconds integer[] NOT NULL,
+              source text, noted_at timestamptz NOT NULL DEFAULT now());
         """)
         # First run only: everything that already has a real caption was processed before
         # routing existed, so clearing its description later must not make it look new.
@@ -2835,6 +2865,10 @@ class RoutingState:
                    "VALUES (%s, now() + make_interval(secs => %s)) "
                    "ON CONFLICT (asset_id) DO UPDATE SET next_check = EXCLUDED.next_check",
                    (asset_id, seconds if seconds is not None else FACE_WAIT_RECHECK_SECONDS))
+
+    def hand_counts(self) -> Dict[str, Tuple[int, List[str]]]:
+        rows = self._exec("SELECT asset_id::text, creampie_times_seconds FROM captioner_hand_counted")
+        return {r[0]: (len(r[1]), [format_ts(t) for t in r[1]]) for r in rows or []}
 
     def deferred_ids(self) -> set:
         rows = self._exec("SELECT asset_id::text FROM captioner_face_wait WHERE next_check > now()")
@@ -2921,6 +2955,7 @@ def main():
             state_conn = conn if conn is not None else (pg_connect() if PGPASSWORD else None)
             if state_conn is not None:
                 state = RoutingState(state_conn)
+                _hand_count_loader[0] = state.hand_counts
                 print("[route] upload routing and album-move handling enabled", flush=True)
         except Exception as e:
             print(f"[route] could not set up routing state: {e}", flush=True)
