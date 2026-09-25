@@ -2792,6 +2792,10 @@ class RoutingState:
             print("[route] asset_job_status.facesRecognizedAt not found -- face wait falls back to "
                   "FACE_WAIT_GRACE_SECONDS after upload", flush=True)
         self.face_has_deleted_at = pg_column_exists(conn, "asset_face", "deletedAt")
+        # Immich v3.2 links faces to people through personGroupId; asset_face has no personId.
+        self.face_person_join = (
+            'p.id = af."personId"' if pg_column_exists(conn, "asset_face", "personId")
+            else 'p."personGroupId" = af."personGroupId"')
 
     def _exec(self, sql: str, params=None):
         with self.conn.cursor() as cur:
@@ -2919,7 +2923,7 @@ class RoutingState:
             rows = self._exec(f"""
                 SELECT fs.embedding::text FROM face_search fs
                 JOIN asset_face af ON af.id = fs."faceId"
-                JOIN person p ON p.id = af."personId"
+                JOIN person p ON {self.face_person_join}
                 WHERE p.name = %s {deleted}
             """, (person_name,))
         except Exception as e:
