@@ -2803,6 +2803,8 @@ class RoutingState:
             CREATE TABLE IF NOT EXISTS captioner_hand_counted (
               asset_id uuid PRIMARY KEY, creampie_times_seconds integer[] NOT NULL,
               source text, noted_at timestamptz NOT NULL DEFAULT now());
+            -- a count Mike gave without times (e.g. "only one"); NULL = len(times)
+            ALTER TABLE captioner_hand_counted ADD COLUMN IF NOT EXISTS creampie_count integer;
         """)
         # First run only: everything that already has a real caption was processed before
         # routing existed, so clearing its description later must not make it look new.
@@ -2867,8 +2869,10 @@ class RoutingState:
                    (asset_id, seconds if seconds is not None else FACE_WAIT_RECHECK_SECONDS))
 
     def hand_counts(self) -> Dict[str, Tuple[int, List[str]]]:
-        rows = self._exec("SELECT asset_id::text, creampie_times_seconds FROM captioner_hand_counted")
-        return {r[0]: (len(r[1]), [format_ts(t) for t in r[1]]) for r in rows or []}
+        rows = self._exec("SELECT asset_id::text, creampie_times_seconds, creampie_count "
+                          "FROM captioner_hand_counted")
+        return {r[0]: (r[2] if r[2] is not None else len(r[1]), [format_ts(t) for t in r[1]])
+                for r in rows or []}
 
     def deferred_ids(self) -> set:
         rows = self._exec("SELECT asset_id::text FROM captioner_face_wait WHERE next_check > now()")
