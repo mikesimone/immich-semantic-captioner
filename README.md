@@ -155,6 +155,13 @@ information get no title: UUIDs, long hex, random letter+digit ids, gfycat-style
 and camera/phone/timestamp names (IMG_, PXL_, RDT_…, `signal-2026-…`, `SpyVideo_2026…`). A bare
 `Please Categorize` caption is left bare.
 
+**Mike's dogs are named by album** (2026-09-26): `000.001 - Ruby` ... `000.010 - Randy` are mapped by
+prefix in `IDENTITY_ALBUM_PREFIX_MAP` with dog noun hints, so captions name the dog and the prompt
+says it is a real dog, never a person (same for the Immich Person "Lolo", which is a dog face).
+Prefix-mapped identities only take noun hints on an exact name match, so people like "Katie Mac"
+never inherit a dog's hints. Existing captions got a `Dog | <name(s)>` field via
+`scripts/backfill_dog_names.py` (text-only, before any trailing `Title` field).
+
 **Real animals are never furry** (Mike, 2026-09-26): the caption prompt describes photos of real
 animals plainly (never "anthropomorphic"/"furry"/"nude"), the upload triage answers ANTHRO: N for
 real pets/livestock/wildlife, and assets in `captioner_not_furry` are never auto-filed into Furry
