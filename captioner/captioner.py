@@ -807,6 +807,10 @@ _COMMON_CAPTION_RULES = (
     "that. Do NOT call an ordinary human-looking illustrated/anime/cartoon character "
     "\"anthro\" or \"furry\" -- those words are ONLY for characters with real animal "
     "features, never just because something is a cartoon or illustration.\n"
+    "- If this is a PHOTOGRAPH of a real animal (a pet dog or cat, livestock, wildlife), describe "
+    "it plainly as that animal (e.g. \"a white fluffy dog\") and NEVER call it anthropomorphic, "
+    "anthro or furry -- those words are only for drawn, rendered, or costumed humanlike "
+    "characters. Real animals don't wear clothes, so don't describe them as nude or naked.\n"
     "- Where it fits, use the same terms e621/Rule34 taggers use for acts, kinks, species, or "
     "fetish elements (e.g. \"paizuri\", \"gangbang\", \"bukkake\", \"futanari\") instead of "
     "vaguer plain-English phrasing.\n"
@@ -2532,7 +2536,9 @@ _TRIAGE_PROMPT = (
     "sentences or explanations.\n"
     "ANTHRO: Y or N -- Y if any anthropomorphic animal character is shown: a humanoid "
     "character with an animal head, muzzle or snout, fur covering the body, paws, or an animal "
-    "tail (furry / anthro art, whether drawn, painted, or 3D-rendered). N for real animals. N "
+    "tail (furry / anthro art, whether drawn, painted, or 3D-rendered). N for any photograph of a "
+    "real animal -- a pet dog or cat, livestock, wildlife -- even if it's fluffy, posed, or wearing "
+    "a bandana or costume. N "
     "for an ordinary human, including a human wearing animal ears, a tail, horns, or cow-print "
     "clothing as a costume or accessory.\n"
     "COW: Y or N -- Y only if ANTHRO is Y and at least one anthro character is a cow, bull, or "
@@ -2863,6 +2869,10 @@ class RoutingState:
               source text, noted_at timestamptz NOT NULL DEFAULT now());
             -- a count Mike gave without times (e.g. "only one"); NULL = len(times)
             ALTER TABLE captioner_hand_counted ADD COLUMN IF NOT EXISTS creampie_count integer;
+            -- assets Mike says are NOT furry (e.g. photos of his real dogs): never auto-filed
+            -- into Furry Stuff or routed as anthro, whatever the caption/triage says
+            CREATE TABLE IF NOT EXISTS captioner_not_furry (
+              asset_id uuid PRIMARY KEY, note text, noted_at timestamptz NOT NULL DEFAULT now());
         """)
         # First run only: everything that already has a real caption was processed before
         # routing existed, so clearing its description later must not make it look new.
@@ -2925,6 +2935,9 @@ class RoutingState:
                    "VALUES (%s, now() + make_interval(secs => %s)) "
                    "ON CONFLICT (asset_id) DO UPDATE SET next_check = EXCLUDED.next_check",
                    (asset_id, seconds if seconds is not None else FACE_WAIT_RECHECK_SECONDS))
+
+    def is_not_furry(self, asset_id: str) -> bool:
+        return bool(self._exec("SELECT 1 FROM captioner_not_furry WHERE asset_id = %s", (asset_id,)))
 
     def hand_counts(self) -> Dict[str, Tuple[int, List[str]]]:
         rows = self._exec("SELECT asset_id::text, creampie_times_seconds, creampie_count "
@@ -3163,7 +3176,8 @@ def main():
                 # stylized as a dog captions as "anthropomorphic dog", which would
                 # otherwise sweep that entire album into Furry Stuff and archive it
                 # out of the timeline.
-                if _FURRY_TRIGGER_RE.search(caption) and not extract_identities_from_albums(albums):
+                if (_FURRY_TRIGGER_RE.search(caption) and not extract_identities_from_albums(albums)
+                        and not (state is not None and state.is_not_furry(asset_id))):
                     immich_add_to_album(asset_id, FURRY_ALBUM_ID)
                     immich_archive(asset_id)
 
@@ -3282,7 +3296,8 @@ def main():
 
             # 3. Anthro. Everything here ends in its regular caption and the archive. Needs a
             # majority of frames (ANTHRO_MIN_FRACTION), not just VIDEO_FLAG_MIN_FRAMES.
-            if frames_majority(triage, "anthro", ANTHRO_MIN_FRACTION):
+            if (frames_majority(triage, "anthro", ANTHRO_MIN_FRACTION)
+                    and not (state is not None and state.is_not_furry(asset_id))):
                 add("furry")
                 if is_video:
                     add("anthro_video")
