@@ -243,6 +243,18 @@ def _identity_prefix_matches(album: str) -> List[str]:
 
 _IDENTITY_HINTS = _parse_noun_hints(IDENTITY_NOUN_HINTS)
 
+
+def identity_hints(name: str) -> List[str]:
+    """Noun hints for an identity. Falls back to the first word ("Jen K" -> "Jen"), except
+    for prefix-mapped identities (the dogs in 000.00x, LydiaDog): those must match exactly,
+    so a real person "Katie Mac" never inherits the dog Katie's dog/puppy nouns."""
+    if name in _IDENTITY_HINTS:
+        return _IDENTITY_HINTS[name]
+    first = (name or "").split()[0] if (name or "").split() else ""
+    if first in _IDENTITY_HINTS and first not in set(_IDENTITY_PREFIX_MAP.values()):
+        return _IDENTITY_HINTS[first]
+    return []
+
 _IDENTITY_ALBUM_REGEXES: Dict[str, re.Pattern] = {
     album_kw: re.compile(rf"\b{re.escape(album_kw)}\b", re.IGNORECASE)
     for album_kw in _IDENTITY_MAP.keys()
@@ -617,7 +629,7 @@ def _caption_references_someone(caption: str, identities: List[str]) -> bool:
     if _PERSON_WORD_RE.search(caption):
         return True
     for name in identities:
-        hints = _IDENTITY_HINTS.get(name) or _IDENTITY_HINTS.get(name.split()[0]) or []
+        hints = identity_hints(name)
         for noun in hints:
             if re.search(rf"\b{re.escape(noun)}\b", caption, re.IGNORECASE):
                 return True
@@ -687,7 +699,7 @@ def apply_identity_overrides(caption: str, albums: List[str]) -> Tuple[str, List
 
     out = caption
     for name in identities:
-        nouns = _IDENTITY_HINTS.get(name) or _IDENTITY_HINTS.get(name.split()[0])
+        nouns = identity_hints(name) or None
         if nouns:
             noun_alt = "|".join(re.escape(n) for n in nouns)
             # The trailing group absorbs a SECOND hint noun when the phrase stacks two of
@@ -768,11 +780,21 @@ def _name_instruction(person_names: Optional[List[str]]) -> str:
     who = " and ".join(person_names)
     verb = "is" if len(person_names) == 1 else "are"
     quoted = " / ".join(f"\"{n}\"" for n in person_names)
-    return (
+    text = (
         f"\n\n{who} {verb} known by name -- always refer to them as {quoted} instead of "
         "\"the woman\"/\"the man\"/\"the girl\"/\"the guy\", even when the rest of the "
         "description is explicit."
     )
+    # Real dogs (identities whose noun hints are all dog words: Mike's dogs, "Lolo") are named
+    # the same way but must never be described as a person.
+    dogs = [n for n in person_names if identity_hints(n) and set(identity_hints(n)) <= _DOG_NOUNS]
+    if dogs:
+        text += (f" {' and '.join(dogs)} {'is a real dog' if len(dogs) == 1 else 'are real dogs'}, "
+                 "not a person -- describe them as a dog, never as a woman, man, girl or guy.")
+    return text
+
+
+_DOG_NOUNS = {"dog", "puppy", "pup", "canine", "hound"}
 
 _COMMON_CAPTION_RULES = (
     "Regardless of your answer below, follow these rules:\n"
