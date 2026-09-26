@@ -155,6 +155,11 @@ information get no title: UUIDs, long hex, random letter+digit ids, gfycat-style
 and camera/phone/timestamp names (IMG_, PXL_, RDT_…, `signal-2026-…`, `SpyVideo_2026…`). A bare
 `Please Categorize` caption is left bare.
 
+**Real animals are never furry** (Mike, 2026-09-26): the caption prompt describes photos of real
+animals plainly (never "anthropomorphic"/"furry"/"nude"), the upload triage answers ANTHRO: N for
+real pets/livestock/wildlife, and assets in `captioner_not_furry` are never auto-filed into Furry
+Stuff or routed as anthro, whatever their caption says (seeded with Bella and other pet photos).
+
 **Creampie counting is done only by the creampie scorer** (`CREAMPIE_SCORER_URL`):
 porn-classifier's `model/serve.py`, a V-JEPA 2 model that watches 4-second clips instead of single
 frames, running as the `creampie_scorer` container next to the captioner on WOPR. The old
