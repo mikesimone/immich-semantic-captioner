@@ -2286,6 +2286,10 @@ MOVE_MAX_ATTEMPTS = int(os.environ.get("MOVE_MAX_ATTEMPTS", "3"))
 # as showing something when at least this many sampled frames say so (videos with fewer
 # than three sampled frames need just one).
 VIDEO_FLAG_MIN_FRAMES = int(os.environ.get("VIDEO_FLAG_MIN_FRAMES", "2"))
+# Upload routing files a video as anthro/furry only when MORE than this fraction of its sampled
+# frames say ANTHRO (Mike, 2026-09-26: "most frames"). Two agreeing frames used to be enough,
+# and upside-down/sideways phone footage of two humans (30cb4f81) got filed as Anthro Video.
+ANTHRO_MIN_FRACTION = float(os.environ.get("ANTHRO_MIN_FRACTION", "0.5"))
 # Cap on how many frames get the (longer) porn-category prompt.
 PORN_PROMPT_MAX_FRAMES = int(os.environ.get("PORN_PROMPT_MAX_FRAMES", "12"))
 # Extra early timestamps checked for studio title cards/logos, which open the video and
@@ -2568,6 +2572,12 @@ def frames_agree(rows: List[dict], key: str) -> bool:
         return False
     need = 1 if len(rows) < 3 else min(VIDEO_FLAG_MIN_FRAMES, len(rows))
     return sum(1 for r in rows if r.get(key)) >= need
+
+def frames_majority(rows: List[dict], key: str, fraction: float) -> bool:
+    """Whether MORE than `fraction` of the per-frame answers say `key` (a single frame counts)."""
+    if not rows:
+        return False
+    return sum(1 for r in rows if r.get(key)) > fraction * len(rows)
 
 def _evenly(items: list, n: int) -> list:
     if len(items) <= n:
@@ -3218,8 +3228,9 @@ def main():
             triage = _classify_with_prompt([img for _, img in frames], _TRIAGE_PROMPT,
                                            _parse_triage, caption_detailed, max_new_tokens=40)
 
-            # 3. Anthro. Everything here ends in its regular caption and the archive.
-            if frames_agree(triage, "anthro"):
+            # 3. Anthro. Everything here ends in its regular caption and the archive. Needs a
+            # majority of frames (ANTHRO_MIN_FRACTION), not just VIDEO_FLAG_MIN_FRAMES.
+            if frames_majority(triage, "anthro", ANTHRO_MIN_FRACTION):
                 add("furry")
                 if is_video:
                     add("anthro_video")
