@@ -125,7 +125,7 @@ stop processing; a stopped asset still gets its normal caption so it isn't re-qu
    gets filed there and captioned with their name, and stays in the timeline. People without an
    album just get named in the caption. `ROUTING_PERSON_EXCLUDE` (LydiaDog by default) is skipped.
 3. **Anthro**: `300.000.000 - Furry Stuff`. Videos also go to `300.001` (and `300.002` for
-   anthro/anthro sex or `300.004` for human/anthro sex). Stills go to `300.005` for human/anthro sex,
+   anthro/anthro sex or `300.004` for human/anthro sex). A video counts as anthro only when more than half of its sampled frames say so (`ANTHRO_MIN_FRACTION`, default 0.5). Stills go to `300.005` for human/anthro sex,
    `300.000.002` for an anthro cow, and `300.006.000 - Lydia Dog` when the generation info names her
    LoRA, Immich tags her, or a low-threshold face re-detection matches her tagged faces. Archived.
 4. **Nudity**: without nudity, the regular caption, left in the timeline.
