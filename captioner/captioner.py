@@ -485,6 +485,54 @@ def split_description(desc: Optional[str]) -> Tuple[str, Optional[str]]:
         return "", gen
     return desc.strip(), None
 
+# ---- "Title" field: the video's original filename, so it shows in the caption (Mike, 2026-09-26) ----
+# Appended as the LAST " | "-separated field so with_creampie_count(), which expects "Separate
+# Creampies" first, keeps working. Filenames that carry no information get no title:
+# UUIDs, long hex strings, camera/phone/timestamp names (IMG_1234, PXL_..., RDT_20260918_212345,
+# 20260918_212345...), gfycat-style random words (VigorousConcernedSalmon[-mobile]) and
+# random ids of 12+ letters and digits with no separators (dHs2J88pkkJlFWdU).
+_TITLE_SKIP_RES = [
+    re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I),
+    re.compile(r"^[0-9a-f]{16,}$", re.I),
+    re.compile(r"^(IMG|VID|PXL|MVI|DSC|DSCN|GOPR|GX|MOV|RDT|Screenrecorder|Screen[ _-]?Recording|screen)"
+               r"[ _-]*\d", re.I),
+    re.compile(r"^\d{8}[ _-]\d{6}"),
+    # a short word + only a date-time stamp: signal-2026-04-12-16-02-51-746, SpyVideo_20260617_113452394
+    re.compile(r"^[A-Za-z ]{0,12}[ _-]*\d{4}[-_]?\d{2}[-_]?\d{2}[-_ ]+\d{2}[-_.]?\d{2}[-_.]?\d{2}[\d_.-]*$"),
+    re.compile(r"^(?:[A-Z][a-z]+){3,}(?:-mobile)?$"),
+    re.compile(r"^(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{12,}$"),  # random id: dHs2J88pkkJlFWdU
+]
+
+
+def video_title(filename: Optional[str]) -> Optional[str]:
+    stem = re.sub(r"\.[A-Za-z0-9]{2,4}$", "", (filename or "").strip()).strip()
+    if not stem or any(rx.search(stem) for rx in _TITLE_SKIP_RES):
+        return None
+    return stem.replace(" | ", " / ")
+
+
+def with_title(caption: str, title: Optional[str]) -> str:
+    """caption with a trailing "Title | <title>" field (replacing any existing one)."""
+    parts = [p for p in (caption or "").split(" | ")]
+    if len(parts) >= 2 and "Title" in parts[:-1]:
+        i = len(parts) - 1 - parts[::-1].index("Title")
+        if i < len(parts) - 1:
+            parts = parts[:i] + parts[i + 2:]
+    base = " | ".join(parts).strip()
+    # A bare "Please Categorize" must stay bare: the album-move handler empties it to requeue.
+    if not title or not base or base.lower() == UNCATEGORIZED_CAPTION.lower():
+        return base
+    return f"{base} | Title | {title}"
+
+
+def immich_original_filename(asset_id: str) -> Optional[str]:
+    try:
+        r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}", headers=immich_headers(), timeout=30)
+        return r.json().get("originalFileName") if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
 def compose_description(caption: str, gen_info: Optional[str]) -> str:
     """Join a caption back together with the generation info it must not lose."""
     if not gen_info:
@@ -3063,6 +3111,8 @@ def main():
         if not caption:
             mark_empty_caption(asset_id)
             return
+        if asset_type == "VIDEO":
+            caption = with_title(caption, video_title(immich_original_filename(asset_id)))
 
         # Truncation above applies to the caption alone -- the generation info is
         # re-attached afterwards so MAX_CAPTION_CHARS can never clip the JSON.
@@ -3162,6 +3212,8 @@ def main():
                 # Misfile cleanup is deliberately ignored here: every album this path adds
                 # was chosen by looking at the asset, not by a human who might have slipped.
                 caption, _, _ = finalize_caption(raw_caption, mode, albums)
+            if caption and is_video:
+                caption = with_title(caption, video_title(filename))
             if not caption:
                 mark_empty_caption(asset_id)
             elif immich_update_description(asset_id, compose_description(caption, gen_info)):

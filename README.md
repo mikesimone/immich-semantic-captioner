@@ -148,6 +148,13 @@ don't count.
 - Added to `200.001.000 - Single Creampie`: archived.
 - Added to any `100.000.x` album: the scorer counts creampies, and archive state is left alone.
 
+**Video titles:** every video caption ends with `Title | <original filename without extension>`
+(Mike, 2026-09-26), added by the captioner and backfilled by `scripts/backfill_video_titles.py`.
+It's the last field so the count logic still finds `Separate Creampies` first. Names with no
+information get no title: UUIDs, long hex, random letter+digit ids, gfycat-style random words,
+and camera/phone/timestamp names (IMG_, PXL_, RDT_…, `signal-2026-…`, `SpyVideo_2026…`). A bare
+`Please Categorize` caption is left bare.
+
 **Creampie counting is done only by the creampie scorer** (`CREAMPIE_SCORER_URL`):
 porn-classifier's `model/serve.py`, a V-JEPA 2 model that watches 4-second clips instead of single
 frames, running as the `creampie_scorer` container next to the captioner on WOPR. The old
