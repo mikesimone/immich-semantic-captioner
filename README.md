@@ -167,6 +167,9 @@ animals plainly (never "anthropomorphic"/"furry"/"nude"), the upload triage answ
 real pets/livestock/wildlife, and assets in `captioner_not_furry` are never auto-filed into Furry
 Stuff or routed as anthro, whatever their caption says (seeded with Bella and other pet photos).
 
+`200.000.009 - MSOG` ("multiple shots on goal": the same man repeatedly, or the same woman across
+scenes) sits in the multi range but gets no creampie count (`NO_COUNT_ALBUM_PREFIXES`).
+
 **Creampie counting is done only by the creampie scorer** (`CREAMPIE_SCORER_URL`):
 porn-classifier's `model/serve.py`, a V-JEPA 2 model that watches 4-second clips instead of single
 frames, running as the `creampie_scorer` container next to the captioner on WOPR. The old
