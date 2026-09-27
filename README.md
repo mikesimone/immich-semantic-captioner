@@ -169,8 +169,9 @@ Stuff or routed as anthro, whatever their caption says (seeded with Bella and ot
 
 `200.001.002 - MSOG` ("multiple shots on goal": the same man repeatedly, or the same woman across
 scenes) sits after Creampie Compilation, outside the 200.000.xxx multi range, so it gets no
-creampie count -- only 200.000.xxx is counted. `NO_COUNT_ALBUM_PREFIXES`
-(default 200.000.009) exists for any album that must sit in the multi range uncounted.
+creampie count -- only 200.000.xxx is counted. `NO_COUNT_ALBUM_PREFIXES` (default empty) can exempt
+an album inside the multi range. `200.000.009 - Multi-Potato` holds low-resolution multi-creampie
+videos (short side under 384 px) and is counted like its siblings.
 
 **Creampie counting is done only by the creampie scorer** (`CREAMPIE_SCORER_URL`):
 porn-classifier's `model/serve.py`, a V-JEPA 2 model that watches 4-second clips instead of single
