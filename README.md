@@ -167,8 +167,9 @@ animals plainly (never "anthropomorphic"/"furry"/"nude"), the upload triage answ
 real pets/livestock/wildlife, and assets in `captioner_not_furry` are never auto-filed into Furry
 Stuff or routed as anthro, whatever their caption says (seeded with Bella and other pet photos).
 
-`201.000.000 - MSOG` ("multiple shots on goal": the same man repeatedly, or the same woman across
-scenes) is outside the 200.000 multi range, so it gets no creampie count. `NO_COUNT_ALBUM_PREFIXES`
+`200.001.002 - MSOG` ("multiple shots on goal": the same man repeatedly, or the same woman across
+scenes) sits after Creampie Compilation, outside the 200.000.xxx multi range, so it gets no
+creampie count -- only 200.000.xxx is counted. `NO_COUNT_ALBUM_PREFIXES`
 (default 200.000.009) exists for any album that must sit in the multi range uncounted.
 
 **Creampie counting is done only by the creampie scorer** (`CREAMPIE_SCORER_URL`):
