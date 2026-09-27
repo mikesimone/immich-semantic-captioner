@@ -121,11 +121,11 @@ HUCOW_ALBUM_ID = os.environ.get("HUCOW_ALBUM_ID", "d526cf69-8aed-4fdc-b93e-6daca
 # nudity found outside them is parked at "Please categorize" for manual sorting instead of
 # being guessed at.
 MULTI_CREAMPIE_PREFIX = os.environ.get("MULTI_CREAMPIE_PREFIX", "200.000.")
-# Albums inside the multi range that get NO creampie count. 200.000.009 - MSOG ("multiple shots
-# on goal": same man repeatedly / same woman across scenes) -- Mike, 2026-09-27: "anything I put
-# in MSOG doesn't need a count".
+# Albums inside the multi range that get NO creampie count (comma-separated number prefixes).
+# Empty by default: MSOG, the album this was added for, ended up at 200.001.002 outside the multi
+# range, and 200.000.009 is now "Multi-Potato", which IS counted.
 NO_COUNT_ALBUM_PREFIXES = tuple(
-    p.strip() for p in os.environ.get("NO_COUNT_ALBUM_PREFIXES", "200.000.009").split(",") if p.strip())
+    p.strip() for p in os.environ.get("NO_COUNT_ALBUM_PREFIXES", "").split(",") if p.strip())
 
 # The one album whose members are guaranteed to hold multiples, so its count never reads
 # below MULTI_CREAMPIE_MIN_COUNT. Other 200.000.x albums (studios etc.) aren't floored.
@@ -1309,7 +1309,7 @@ def is_multiple_creampie_album(albums: List[str]) -> bool:
     # Orgy, Hentaied...). Being filed into any of them is the human saying "this is a
     # multi", so event counting runs for all of them.
     return any((album or "").strip().startswith(MULTI_CREAMPIE_PREFIX)
-               and not (album or "").strip().startswith(NO_COUNT_ALBUM_PREFIXES)
+               and not (NO_COUNT_ALBUM_PREFIXES and (album or "").strip().startswith(NO_COUNT_ALBUM_PREFIXES))
                for album in (albums or []))
 
 def is_guaranteed_multi_album(albums: List[str]) -> bool:
