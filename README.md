@@ -120,10 +120,10 @@ stop processing; a stopped asset still gets its normal caption so it isn't re-qu
 
 1. **CamSpy**: EXIF make `Meta` (Ray-Ban Meta) or a filename containing `SpyPhoto` goes to
    `400.001`, gets the full narrative caption, and is archived.
-   A filename **starting** with `SpyVideo` (`CAMSPY_MINIMAL_PREFIX`) is the exception, and it
-   applies on every path, not just new uploads: the file is added to `400.001` (any albums
+   A filename **starting** with `SpyVideo` (`CAMSPY_MINIMAL_PREFIX`) is the exception, but
+   only while the asset is still **unarchived**: the file is added to `400.001` (any albums
    it's already in stay), archived, and captioned with only one factual sentence about the
-   scene, taken from the middle frame. It never gets the narrative, porn, or creampie fields.
+   scene, taken from the middle frame. Already-archived SpyVideos are never redone this way.
 2. **Known person**: the asset waits (up to `FACE_WAIT_MAX_SECONDS`) for Immich's face
    recognition. A named person with an album titled after them (`002.000 - Lydia`, `Me`, ...)
    gets filed there and captioned with their name, and stays in the timeline. People without an

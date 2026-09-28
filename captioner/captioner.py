@@ -2389,8 +2389,10 @@ TITLECARD_TIMESTAMPS = [
 
 CAMSPY_FILENAME_KEYWORD = os.environ.get("CAMSPY_FILENAME_KEYWORD", "SpyPhoto").strip().lower()
 # Owner rule (2026-09-28): a file whose name STARTS with this goes into Camspy (on top of any
-# album it's already in), is archived, and gets only a one-sentence scene caption -- on every
-# path, new upload or recaption. Empty disables it.
+# album it's already in), is archived, and gets only a one-sentence scene caption. Only for
+# assets that are still UNARCHIVED when the captioner reaches them -- already-archived ones
+# keep whatever caption they get by album ("do NOT recaption previous SpyVideo videos").
+# Empty disables it.
 CAMSPY_MINIMAL_PREFIX = os.environ.get("CAMSPY_MINIMAL_PREFIX", "SpyVideo").strip().lower()
 MINIMAL_SCENE_PROMPT = (
     "Describe the scene in this frame in one short sentence: the setting and what is happening. "
@@ -2550,6 +2552,13 @@ def is_camspy_upload(exif_make: Optional[str], filename: Optional[str]) -> bool:
 
 def is_camspy_minimal(filename: Optional[str]) -> bool:
     return bool(CAMSPY_MINIMAL_PREFIX) and os.path.basename(filename or "").lower().startswith(CAMSPY_MINIMAL_PREFIX)
+
+
+def immich_is_archived(asset_id: str) -> bool:
+    r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}", headers=immich_headers(), timeout=30)
+    r.raise_for_status()
+    a = r.json()
+    return a.get("visibility") == "archive" or bool(a.get("isArchived"))
 
 # ---- "Please Categorize" prefix and creampie-count field editing ----
 def has_uncategorized_prefix(caption: str) -> bool:
@@ -3589,7 +3598,8 @@ def main():
             # Re-read album membership as late as possible -- see refresh_asset_albums().
             albums = refresh_asset_albums(asset_id, albums)
 
-            if CAMSPY_MINIMAL_PREFIX and is_camspy_minimal(filename or immich_original_filename(asset_id)):
+            if (CAMSPY_MINIMAL_PREFIX and is_camspy_minimal(filename or immich_original_filename(asset_id))
+                    and not immich_is_archived(asset_id)):
                 if prefetched_thumbnail_error is not None and asset_type != "VIDEO":
                     raise prefetched_thumbnail_error
                 caption_camspy_minimal(asset_id, asset_type, gen_info, prefetched_thumbnail)
