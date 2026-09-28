@@ -994,6 +994,14 @@ def load_joycaption():
         for row in gen_only:
             txt = processor.tokenizer.decode(row, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             out.append(" ".join(txt.strip().split())[:MAX_CAPTION_CHARS])
+        # Every real generation call funnels through here, so this is the one place to
+        # release PyTorch's cached allocator blocks back to the driver between captions --
+        # without it the process's resident VRAM stays pinned near its peak (measured 12.2GB
+        # idle) long after the batch that caused it, leaving Immich's on-demand video
+        # transcode too little headroom and triggering GPU OOMs on playback (2026-09-27
+        # 21:00-23:00, ~280 failed transcodes / 71 OOM errors -- see weekly log review).
+        del inputs, generate_ids, gen_only
+        torch.cuda.empty_cache()
         return out
 
     _batch_state = {"max_batch": 1}
@@ -2380,6 +2388,14 @@ TITLECARD_TIMESTAMPS = [
 ]
 
 CAMSPY_FILENAME_KEYWORD = os.environ.get("CAMSPY_FILENAME_KEYWORD", "SpyPhoto").strip().lower()
+# Owner rule (2026-09-28): a file whose name STARTS with this goes into Camspy (on top of any
+# album it's already in), is archived, and gets only a one-sentence scene caption -- on every
+# path, new upload or recaption. Empty disables it.
+CAMSPY_MINIMAL_PREFIX = os.environ.get("CAMSPY_MINIMAL_PREFIX", "SpyVideo").strip().lower()
+MINIMAL_SCENE_PROMPT = (
+    "Describe the scene in this frame in one short sentence: the setting and what is happening. "
+    "Plain and factual. No speculation about who anyone is."
+)
 
 # Immich People who must NOT be treated as "one of us" in step 2. LydiaDog is a generated
 # character with her own step-3 rule, not a person album.
@@ -2531,6 +2547,9 @@ def is_camspy_upload(exif_make: Optional[str], filename: Optional[str]) -> bool:
     if (exif_make or "").strip().lower() == CAMSPY_EXIF_MAKE:
         return True
     return bool(CAMSPY_FILENAME_KEYWORD) and CAMSPY_FILENAME_KEYWORD in (filename or "").lower()
+
+def is_camspy_minimal(filename: Optional[str]) -> bool:
+    return bool(CAMSPY_MINIMAL_PREFIX) and os.path.basename(filename or "").lower().startswith(CAMSPY_MINIMAL_PREFIX)
 
 # ---- "Please Categorize" prefix and creampie-count field editing ----
 def has_uncategorized_prefix(caption: str) -> bool:
@@ -3085,9 +3104,9 @@ def main():
         caption = clean_caption(raw_caption)
         if not caption.strip():
             return "", [], []
-        if mode != "VIDEO-PORN-COMPACT":
+        if mode not in ("VIDEO-PORN-COMPACT", "MINIMAL-SCENE"):
             caption = strip_false_nudity_leaks(caption, albums)
-        if mode == "VIDEO-PORN-COMPACT":
+        if mode in ("VIDEO-PORN-COMPACT", "MINIMAL-SCENE"):
             # The compact field format has no "the woman"/"she" prose to substitute a
             # name into, and it deliberately omits any person-reference wording when
             # the only identified person is Lydia (that's the whole point of skipping
@@ -3223,6 +3242,45 @@ def main():
 
         if STAMP_PORN_CAPTION_DATE and mode == "VIDEO-PORN-COMPACT":
             immich_set_date_taken_now(asset_id)
+
+    def caption_camspy_minimal(asset_id: str, asset_type: str, gen_info: Optional[str],
+                               thumb: Optional[Image.Image]) -> None:
+        """SpyVideo files: into Camspy, archived, one-sentence scene caption from the middle
+        frame. Existing albums are left alone -- this only adds Camspy."""
+        nonlocal total_done
+        if asset_type == "VIDEO":
+            fd, path = tempfile.mkstemp(suffix=".mp4")
+            os.close(fd)
+            try:
+                immich_download_original(asset_id, path)
+                frames = extract_video_frames(path, dense=False)
+            finally:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            if not frames:
+                raise RuntimeError("no frames extracted")
+            img = frames[len(frames) // 2][1]
+        else:
+            img = thumb if thumb is not None else immich_get_thumbnail(asset_id)
+        raw = caption_detailed(img, prompt_override=MINIMAL_SCENE_PROMPT, max_new_tokens=60, greedy=True)
+        immich_add_to_album(asset_id, CAMSPY_ALBUM_ID)
+        if state is not None:
+            state.record_membership(CAMSPY_ALBUM_ID, asset_id)
+        albums = refresh_asset_albums(asset_id, [])
+        caption, _, _ = finalize_caption(raw, "MINIMAL-SCENE", albums)
+        if not caption:
+            mark_empty_caption(asset_id)
+            return
+        if not immich_update_description(asset_id, compose_description(caption, gen_info)):
+            print(f"[fail] {asset_id} update failed", flush=True)
+            return
+        immich_archive(asset_id)
+        if state is not None:
+            state.mark_routed(asset_id, "camspy")
+        total_done += 1
+        print(f"[ok] {asset_id} [MINIMAL-SCENE] camspy albums=[{', '.join(albums)}] archived=True => {caption}", flush=True)
 
     def route_new_asset(
         asset_id: str,
@@ -3531,7 +3589,11 @@ def main():
             # Re-read album membership as late as possible -- see refresh_asset_albums().
             albums = refresh_asset_albums(asset_id, albums)
 
-            if state is not None and not albums and not state.is_routed(asset_id):
+            if CAMSPY_MINIMAL_PREFIX and is_camspy_minimal(filename or immich_original_filename(asset_id)):
+                if prefetched_thumbnail_error is not None and asset_type != "VIDEO":
+                    raise prefetched_thumbnail_error
+                caption_camspy_minimal(asset_id, asset_type, gen_info, prefetched_thumbnail)
+            elif state is not None and not albums and not state.is_routed(asset_id):
                 if prefetched_thumbnail_error is not None:
                     raise prefetched_thumbnail_error
                 route_new_asset(asset_id, asset_type, filename, exif_make, gen_info,
