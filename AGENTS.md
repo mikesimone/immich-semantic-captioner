@@ -16,7 +16,7 @@
 - Avoid permanent skips for transient Immich thumbnail/API failures; retry behavior matters.
 - Direct database access must remain optional and clearly separated from supported API behavior.
 - Commands that wipe/reset descriptions are destructive and must remain conspicuously documented.
-- Upload routing (new uploads filed by a fixed order: CamSpy, known person, anthro, nudity, porn categories) and album-move handling (creampie counts on Multiple Creampie / 100.000.x) are specified by the owner; see README "Upload Routing and Album Moves". Album membership by a human stays authoritative, and person filing comes only from Immich face recognition, plus the owner-requested LydiaDog face match for anthro stills.
+- Upload routing (new uploads filed by a fixed order: CamSpy, known person, anthro, nudity, porn categories) and album-move handling (creampie counts on Multiple Creampie / 100.000.x) are specified by the owner; see README "Upload Routing and Album Moves". Filenames starting with `SpyVideo` always get Camspy + archive + a one-sentence scene caption, on every path. Album membership by a human stays authoritative, and person filing comes only from Immich face recognition, plus the owner-requested LydiaDog face match for anthro stills.
 - Routing state lives in `captioner_*` tables in the Immich database and needs PG credentials even in API-only mode; without them routing is off.
 
 ## Working rules
