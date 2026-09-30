@@ -25,6 +25,7 @@ services:
       - IMMICH_API_KEY=${IMMICH_API_KEY:?IMMICH_API_KEY unset - source ~/.api-keys or use scripts/compose.sh}
 
       - BATCH_SIZE=${BATCH_SIZE}
+      - MAX_GEN_BATCH=${MAX_GEN_BATCH:-0}
       - SLEEP_SECONDS=${SLEEP_SECONDS}
       - IDLE_SLEEP_SECONDS=${IDLE_SLEEP_SECONDS}
       - MAX_CAPTION_CHARS=${MAX_CAPTION_CHARS}
