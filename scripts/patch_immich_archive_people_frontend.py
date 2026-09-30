@@ -74,8 +74,22 @@ MAX_HOPS = 5
 # real build as `ae.Timeline`, but that name is not stable across builds). Deliberately avoids
 # \w -- the container's grep doesn't support it (busybox), so the Python and shell versions of
 # this pattern must both stick to POSIX-safe character classes.
-TARGET_RE = re.compile(r"visibility:[A-Za-z_$][A-Za-z0-9_$]*\.Timeline,personId:")
-REPLACEMENT = "personId:"
+#
+# Immich 3.2.x dropped the visibility filter but added `withPartners: true` to the same options
+# object ({personId: data.person.id, withPartners: true}); the server rejects withPartners with
+# 400 unless visibility is Timeline, so archived-only people (Darryl) showed "15 assets" over an
+# empty grid. The second alternative strips that flag. Partners' photos aren't used here.
+TARGET_RE = re.compile(
+    r"visibility:[A-Za-z_$][A-Za-z0-9_$]*\.Timeline,personId:"
+    r"|personId:[A-Za-z0-9_$().]+,withPartners:!0"
+)
+
+
+def REPLACEMENT(m: "re.Match") -> str:
+    t = m.group(0)
+    if t.startswith("visibility:"):
+        return "personId:"
+    return t[: -len(",withPartners:!0")]
 
 
 def log(msg: str) -> None:
