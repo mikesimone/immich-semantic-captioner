@@ -25,6 +25,7 @@ HEALTH_POLL_SECONDS="${HEALTH_POLL_SECONDS:-5}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_SCRIPT="$SCRIPT_DIR/patch_immich_archive_people.py"
 FRONTEND_PATCH_SCRIPT="$SCRIPT_DIR/patch_immich_archive_people_frontend.py"
+PARTNERS_PATCH_SCRIPT="$SCRIPT_DIR/patch_immich_archive_partners.py"
 
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
 
@@ -56,6 +57,11 @@ while read -r _; do
         log "backend patch check/apply completed successfully"
     else
         log "BACKEND PATCH FAILED -- see output above. immich_server is running UNPATCHED (People page will undercount archived-only people again). This needs a human to check whether upstream Immich changed the query this patch targets."
+    fi
+    if python3 "$PARTNERS_PATCH_SCRIPT" --container "$IMMICH_CONTAINER"; then
+        log "partners patch check/apply completed successfully"
+    else
+        log "PARTNERS PATCH FAILED -- see output above. Person pages for people whose photos are all archived will show a count but an empty grid. Needs a human to check what upstream Immich changed."
     fi
     if python3 "$FRONTEND_PATCH_SCRIPT" --container "$IMMICH_CONTAINER"; then
         log "frontend patch check/apply completed successfully"
