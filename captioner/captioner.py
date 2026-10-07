@@ -2407,7 +2407,8 @@ ROUTING_PERSON_EXCLUDE = {
     if n.strip()
 }
 
-# LydiaDog match for anthro stills. Three signals, strongest first: the generation-info JSON
+# LydiaDog match for anthro stills. Three signals, strongest first (only the first is on by
+# default -- see LYDIADOG_FACE_ROUTING): the generation-info JSON
 # naming her LoRA (every render from the local pipeline carries it; the LoRA has shipped under
 # several filenames, so any mention of "lydia" counts -- only renders carry generation info,
 # so a real photo of Lydia can never hit this), Immich's own Person tag,
@@ -2420,6 +2421,12 @@ LYDIADOG_GEN_INFO_KEYWORDS = [
     for k in os.environ.get("LYDIADOG_GEN_INFO_KEYWORDS", "lydia").split(",")
     if k.strip()
 ]
+# The two face-based signals are OFF unless LYDIADOG_FACE_ROUTING=1. buffalo_l is a human-face
+# model: to it every illustrated anthro face looks alike, and on 2026-10-06 it routed a gazelle,
+# a cat, a rabbit, a golden retriever and a crowd scene into her album at similarity 0.72-0.81,
+# plus one more via Immich's Person tag, which comes from the same kind of embedding. Every
+# real render carries generation info, so that signal alone is both sufficient and safe.
+LYDIADOG_FACE_ROUTING = os.environ.get("LYDIADOG_FACE_ROUTING", "0").strip().lower() in ("1", "true", "yes")
 LYDIADOG_MIN_SIMILARITY = float(os.environ.get("LYDIADOG_MIN_SIMILARITY", "0.70"))
 LYDIADOG_DETECT_MIN_SCORE = float(os.environ.get("LYDIADOG_DETECT_MIN_SCORE", "0.05"))
 # Anything filed under this album number -- by the human or by routing -- gets the LydiaDog
@@ -2745,6 +2752,8 @@ def matches_lydiadog(asset_id: str, gen_info: Optional[str], raw_people: List[st
     if gen_info and any(kw in gen_info.lower() for kw in LYDIADOG_GEN_INFO_KEYWORDS):
         print(f"[route] {asset_id} LydiaDog by generation info", flush=True)
         return True
+    if not LYDIADOG_FACE_ROUTING:
+        return False
     if any(n.casefold() == LYDIADOG_PERSON_NAME.casefold() for n in raw_people):
         print(f"[route] {asset_id} LydiaDog by Immich person tag", flush=True)
         return True
@@ -2793,7 +2802,7 @@ def _clamp_box(box: dict, w: int, h: int) -> Optional[Dict[str, int]]:
         return None
     return {"x": round(x1), "y": round(y1), "width": round(x2 - x1), "height": round(y2 - y1)}
 
-def tag_lydiadog(asset_id: str, state: "RoutingState") -> None:
+def tag_lydiadog(asset_id: str, state: "RoutingState", is_video: bool = False) -> None:
     """Give an asset filed under LydiaDog's album the LydiaDog Person tag.
 
     Immich can only tag a person through a face row, and the stock detector finds a face on
@@ -2822,6 +2831,27 @@ def tag_lydiadog(asset_id: str, state: "RoutingState") -> None:
                          headers={**immich_headers(), "Content-Type": "application/json"},
                          data=json.dumps({"id": face["id"]}), timeout=60).raise_for_status()
         print(f"[tag] {asset_id} LydiaDog: adopted existing face {face['id']}", flush=True)
+        return
+
+    if is_video:
+        # No still to re-detect on: album membership says it's her, so tag the whole frame.
+        r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}", headers=immich_headers(), timeout=60)
+        r.raise_for_status()
+        info = r.json()
+        exif = info.get("exifInfo") or {}
+        w = info.get("width") or exif.get("exifImageWidth")
+        h = info.get("height") or exif.get("exifImageHeight")
+        if not w or not h:
+            print(f"[tag] {asset_id} LydiaDog: video has no dimensions yet -- skipped", flush=True)
+            return
+        if not DRY_RUN:
+            requests.post(f"{IMMICH_URL}/api/faces",
+                          headers={**immich_headers(), "Content-Type": "application/json"},
+                          data=json.dumps({"personId": person_id, "assetId": asset_id,
+                                           "imageWidth": w, "imageHeight": h,
+                                           "x": 0, "y": 0, "width": w, "height": h}),
+                          timeout=60).raise_for_status()
+        print(f"[tag] {asset_id} LydiaDog: tagged whole video frame {w}x{h}", flush=True)
         return
 
     r = requests.get(f"{IMMICH_URL}/api/assets/{asset_id}/original", headers=immich_headers(), timeout=180)
@@ -3540,8 +3570,8 @@ def main():
             is_video = (adds[0]["type"] or "").upper() == "VIDEO"
             caption, gen = split_description(adds[0]["description"])
             try:
-                if to_lydiadog and not is_video:
-                    tag_lydiadog(asset_id, state)
+                if to_lydiadog:
+                    tag_lydiadog(asset_id, state, is_video=is_video)
                 if not caption:
                     # Still waiting for its caption: the normal pass captions it by album
                     # (and counts creampies for Multiple Creampie), so only the archive
