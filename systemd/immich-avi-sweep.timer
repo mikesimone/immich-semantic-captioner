@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly AVI-to-MP4 sweep for Immich porn albums
+
+[Timer]
+OnCalendar=*-*-* *:40:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

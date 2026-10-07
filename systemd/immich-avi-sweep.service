@@ -1,0 +1,9 @@
+[Unit]
+Description=Convert AVI videos in porn albums to MP4 so Immich can stream them
+After=docker.service
+
+[Service]
+Type=oneshot
+User=msimone
+Group=msimone
+ExecStart=/bin/bash -c '/opt/captioner/immich-semantic-captioner/scripts/avi_sweep.sh >> /home/msimone/captioner-diag/avi_sweep.log 2>&1'
