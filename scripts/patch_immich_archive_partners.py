@@ -42,31 +42,51 @@ import tempfile
 MARKER = "// [archive-partners-patch] owner archive + partner timeline allowed together\n"
 DIST = "/usr/src/app/server/dist"
 
-OWNER_OLD = "            const isOwner = eb('asset.ownerId', '=', (0, database_1.anyUuid)(options.userIds));\n"
-OWNER_NEW = (
-    "            const isOwner = options.withPartners && options.visibility === undefined && options.userIds.length > 1\n"
-    "                ? eb.or([\n"
-    "                    eb('asset.ownerId', '=', options.userIds[0]),\n"
-    "                    eb.and([\n"
-    "                        eb('asset.ownerId', '=', (0, database_1.anyUuid)(options.userIds.slice(1))),\n"
-    "                        eb('asset.visibility', '=', kysely_1.sql.lit(enum_1.AssetVisibility.Timeline)),\n"
-    "                    ]),\n"
-    "                ])\n"
-    "                : eb('asset.ownerId', '=', (0, database_1.anyUuid)(options.userIds));\n"
+def owner_patch(any_uuid: str, timeline_lit: str) -> tuple[str, str]:
+    old = f"            const isOwner = eb('asset.ownerId', '=', {any_uuid}(options.userIds));\n"
+    new = (
+        "            const isOwner = options.withPartners && options.visibility === undefined && options.userIds.length > 1\n"
+        "                ? eb.or([\n"
+        "                    eb('asset.ownerId', '=', options.userIds[0]),\n"
+        "                    eb.and([\n"
+        f"                        eb('asset.ownerId', '=', {any_uuid}(options.userIds.slice(1))),\n"
+        f"                        eb('asset.visibility', '=', {timeline_lit}),\n"
+        "                    ]),\n"
+        "                ])\n"
+        f"                : eb('asset.ownerId', '=', {any_uuid}(options.userIds));\n"
+    )
+    return old, new
+
+
+# Each pattern lists one (old, new) alternative per Immich build style; the first alternative
+# that matches exactly `expected_count` times is used. v3.3.0 compiles to ES modules, so the
+# CommonJS prefixes of 3.2.x (kysely_1., enum_1., database_1.) are gone; the logic is
+# unchanged. (3.3.0 also ORs shared-album assets around isOwner when personId is set; that
+# wraps isOwner from outside, so replacing isOwner still never admits a partner's archive.)
+# Both files come from the same image, so they always resolve to the same build style.
+V33 = (
+    "const isRequestedArchived = dto.visibility === AssetVisibility.Archive || dto.visibility === undefined;",
+    "const isRequestedArchived = dto.visibility === AssetVisibility.Archive;",
+)
+V32 = (
+    "const isRequestedArchived = dto.visibility === enum_1.AssetVisibility.Archive || dto.visibility === undefined;",
+    "const isRequestedArchived = dto.visibility === enum_1.AssetVisibility.Archive;",
 )
 
-# file -> [(description, old, new, expected_count)]
+# file -> [(description, [(old, new), ...], expected_count)]
 FILES = {
     f"{DIST}/services/timeline.service.js": [
-        (
-            "withPartners check allows undefined visibility",
-            "const isRequestedArchived = dto.visibility === enum_1.AssetVisibility.Archive || dto.visibility === undefined;",
-            "const isRequestedArchived = dto.visibility === enum_1.AssetVisibility.Archive;",
-            1,
-        ),
+        ("withPartners check allows undefined visibility", [V33, V32], 1),
     ],
     f"{DIST}/repositories/asset.repository.js": [
-        ("getTimeBuckets()/getTimeBucket() owner filter", OWNER_OLD, OWNER_NEW, 2),
+        (
+            "getTimeBuckets()/getTimeBucket() owner filter",
+            [
+                owner_patch("anyUuid", "sql.lit(AssetVisibility.Timeline)"),
+                owner_patch("(0, database_1.anyUuid)", "kysely_1.sql.lit(enum_1.AssetVisibility.Timeline)"),
+            ],
+            2,
+        ),
     ],
 }
 
@@ -95,14 +115,15 @@ def main() -> int:
             if content.startswith(MARKER):
                 log(f"{os.path.basename(path)}: already patched")
                 continue
-            for desc, old, new, expected in patches:
-                n = content.count(old)
-                if n != expected:
-                    log(f"FAIL: {desc!r} matched {n} time(s) in {os.path.basename(path)}, expected {expected} "
-                        f"-- upstream code changed. Nothing written.")
+            for desc, alternatives, expected in patches:
+                counts = [content.count(old) for old, _ in alternatives]
+                match = next((alt for alt, n in zip(alternatives, counts) if n == expected), None)
+                if match is None:
+                    log(f"FAIL: {desc!r} matched {counts} time(s) in {os.path.basename(path)} (one per known "
+                        f"build style), expected {expected} -- upstream code changed. Nothing written.")
                     return 1
-                content = content.replace(old, new)
-                log(f"  {os.path.basename(path)}: {desc}: {n} occurrence(s)")
+                content = content.replace(*match)
+                log(f"  {os.path.basename(path)}: {desc}: {expected} occurrence(s)")
             open(local, "w", encoding="utf-8").write(MARKER + content)
             staged.append((local, path))
 

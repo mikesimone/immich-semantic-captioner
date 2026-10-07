@@ -11,7 +11,9 @@ excluded, even though the Person row, the face, and the name are all completely 
 fully functional otherwise (confirmed: GET /api/people/{id} and search-by-personId both work
 fine regardless of visibility). The same restriction also appears in getStatistics() (a
 person's "X photos" count) and getNumberOfPeople() (the total/hidden counts on the /api/people
-response). This patches all three call sites in place, inside the already-running container's
+response). (From v3.3.0 getAllForUser() and getNumberOfPeople() share one join in
+getVisiblePeopleQuery(), so there are two call sites; see VARIANTS.) This patches all call
+sites in place, inside the already-running container's
 compiled JS -- no image rebuild, no source fork, so it survives normal container restarts and
 keeps working after immich-auto-upgrade.service pulls a new upstream image, AS LONG AS this
 script is re-run after every immich_server start (see the companion watcher service/systemd
@@ -51,7 +53,7 @@ MARKER = "// [archive-people-patch] visibility restriction removed from People q
 # success having left getStatistics() fully restricted: every person's photo count silently
 # dropped to timeline-visibility assets only. An exact count turns that class of upstream
 # drift back into the loud failure this script promises in its docstring.
-PATCHES = [
+PATCHES_V32 = [
     (
         "getAllForUser() join tail",
         "            .on('asset.visibility', '=', kysely_1.sql.lit(enum_1.AssetVisibility.Timeline))\n"
@@ -80,6 +82,26 @@ PATCHES = [
     ),
 ]
 
+# v3.3.0 compiles to ES modules (`sql.lit(AssetVisibility.Timeline)`, no `kysely_1.`/`enum_1.`
+# prefixes) and routes both getAllForUser() and getNumberOfPeople() through one shared
+# getVisiblePeopleQuery(userId, partnerIds), so there are two call sites, told apart by the
+# variable names in the owner predicate that follows the visibility line.
+def _v33_site(owner_var: str) -> tuple[str, str]:
+    tail = (
+        "            .on('asset.deletedAt', 'is', null)\n"
+        f"            .on((eb) => eb.or([eb('asset.ownerId', '=', anyUuid([{owner_var}, ...partnerIds])), "
+        f"inSharedAlbum(eb, {owner_var})])))"
+    )
+    return "            .on('asset.visibility', '=', sql.lit(AssetVisibility.Timeline))\n" + tail, tail
+
+PATCHES_V33 = [
+    ("getVisiblePeopleQuery() join (getAllForUser + getNumberOfPeople)", *_v33_site("userId"), 1),
+    ("getStatistics() join", *_v33_site("ownerId"), 1),
+]
+
+# Tried in order; the first variant whose every pattern matches its exact count is applied.
+# If none match fully, nothing is written (see main()).
+VARIANTS = [("3.3.x", PATCHES_V33), ("3.2.x", PATCHES_V32)]
 
 def log(msg: str) -> None:
     print(f"[patch] {msg}", flush=True)
@@ -115,21 +137,33 @@ def main() -> int:
             log(f"already patched ({args.container} needs no change)")
             return 0
 
+        chosen = None
+        for version, patches in VARIANTS:
+            counts = [content.count(old) for _, old, _, _ in patches]
+            if all(c == exp for c, (_, _, _, exp) in zip(counts, patches)):
+                chosen = (version, patches)
+                break
+            mismatches = ", ".join(
+                f"{desc!r} matched {c}, expected {exp}"
+                for c, (desc, _, _, exp) in zip(counts, patches) if c != exp
+            )
+            log(f"  {version} patterns don't fit: {mismatches}")
+        if chosen is None:
+            log(
+                "FAIL: no known patch variant matches -- upstream code likely changed since this "
+                "patch was written. Not touching the file. Needs a human to re-derive the patch "
+                "against the current dist/repositories/person.repository.js."
+            )
+            return 1
+
+        version, patches = chosen
+        log(f"using {version} patterns")
         new_content = content
         total_replacements = 0
-        for desc, old, new, expected in PATCHES:
-            count = new_content.count(old)
-            if count != expected:
-                log(
-                    f"FAIL: pattern for {desc!r} matched {count} time(s), expected {expected} "
-                    f"-- upstream code likely changed since this patch was written. Not touching "
-                    f"the file. Needs a human to re-derive the patch against the current "
-                    f"dist/repositories/person.repository.js."
-                )
-                return 1
+        for desc, old, new, expected in patches:
             new_content = new_content.replace(old, new)
-            total_replacements += count
-            log(f"  {desc}: {count} occurrence(s) patched")
+            total_replacements += expected
+            log(f"  {desc}: {expected} occurrence(s) patched")
 
         new_content = MARKER + new_content
 
