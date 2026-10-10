@@ -97,15 +97,19 @@ scripts/compose.sh up -d immich-captioner
 
 For each Immich asset with an empty description:
 
-1. Pulls candidate assets directly from Immich’s Postgres database.
-2. Fetches the asset thumbnail via the Immich API.
-3. Runs Florence-2:
-   - OCR first (for screenshots, memes, documents)
-   - Detailed caption fallback (for photos)
+1. Finds candidates via Immich's `/search/metadata` API (default, `USE_API_ONLY=true`), or
+   directly from Immich's Postgres when that's turned off.
+2. Fetches the thumbnail (stills) or samples frames from the original (videos) via the API.
+3. Runs Florence-2-large OCR (screenshots, memes, documents) and a JoyCaption detailed
+   caption (8-bit LLM, batched on the GPU); OCR text is kept in front when it's meaningful.
 4. Cleans watermark and meme boilerplate text.
-5. Injects deterministic identity tokens based on album naming convention.
-6. Updates the description via Immich’s API.
-7. Skips problematic assets via a persistent skip table.
+5. Injects deterministic identity tokens from album names and named Immich People.
+6. Files new uploads and reacts to album moves (see below), asking the porn-classifier
+   scoring service for event counts.
+7. Writes the description back via Immich's API; transient failures are retried, not skipped.
+
+This repo is one part of a larger system (annotator, video classifier, LoRA training):
+see `docs/media-ai-pipeline.md` in `mikesimone/Environment` for the map.
 
 ---
 
@@ -207,19 +211,23 @@ run), `captioner_face_wait`, and `captioner_album_member`.
 ## Architecture Overview
 
 ```
-Immich Postgres  ──→  Candidate Selection
+Immich API /search/metadata  ──→  Candidate Selection  (or Postgres, direct-DB mode)
         │
         ↓
-Immich API  ──→  Thumbnail Fetch
+Immich API  ──→  Thumbnail / original fetch (video: sampled frames)
         │
         ↓
-Florence-2 (GPU or CPU)
+Florence-2 OCR  +  JoyCaption detailed caption (GPU, batched)
         │
         ↓
 Caption Cleanup + Identity Injection
         │
+        ├──→  creampie_scorer (porn-classifier, POST /score) for video event counts
         ↓
-Immich API  ──→  Description Update
+Upload routing / album-move handling  (state in captioner_* tables, Immich Postgres)
+        │
+        ↓
+Immich API  ──→  Description update, albums, archive, tags
 ```
 
 ---
