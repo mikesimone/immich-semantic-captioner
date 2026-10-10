@@ -1,6 +1,17 @@
 # Known issues
 
-## MP4 container declares the wrong duration -- videos are under-sampled
+## Fixed 2026-08-10 (`87c94d7`): MP4 container declares the wrong duration
+
+`probe_duration_seconds()` now reads the video stream's `nb_frames / r_frame_rate` alongside
+`format=duration` and trusts the longer one when they disagree by more than 5%
+(`DURATION_MISMATCH_TOLERANCE`), logging the override. No decode needed.
+
+**Still open:** no record that videos captioned *before* the fix were surveyed and
+re-captioned. Those captions may still reflect only the first part of the file.
+
+### History (superseded, kept for context)
+
+#### Original report: MP4 container declares the wrong duration -- videos are under-sampled
 
 Some files declare a duration in their MP4 header that is far shorter than the actual
 content. `ffprobe -show_entries format=duration` reports the header value, and Immich stores
@@ -22,7 +33,7 @@ the runtime.
 This is a plausible contributor to odd counts on long compilations specifically, since
 they're the files most likely to have been re-muxed.
 
-### Suggested fix
+#### Suggested fix (implemented as above)
 
 In `probe_duration_seconds()`, cross-check the header against the frame count:
 
@@ -36,7 +47,7 @@ trust the frame count. No decode required, so it's cheap enough to run for every
 Afterwards, survey the library for affected files and clear their descriptions so they get
 re-captioned across their full runtime.
 
-### Related
+#### Related
 
 The annotator in the `porn-classifier` repo already works around the display half of this:
 it shows the larger of the browser's decoded duration and Immich's metadata, and says so
