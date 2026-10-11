@@ -2632,6 +2632,31 @@ def _parse_triage(text: str) -> dict:
         "nudity": bool(re.search(r"NUDITY\s*:\s*Y", t)),
     }
 
+# The triage prompt's "ANTHRO: Y or N" line is not trustworthy on its own: JoyCaption answers
+# Y for nearly everything (human porn, phone photos, screenshots, a vehicle registration --
+# 16 misfiles Mike unarchived from Furry Stuff on 2026-10-10). It does describe images
+# accurately, so the anthro decision asks it to name what it sees first and keys off that.
+_ANTHRO_DESCRIBE_PROMPT = (
+    "Who or what is the main subject of this image? Start your answer with exactly one of "
+    "these words, then a colon, then a short phrase describing them:\n"
+    "PEOPLE -- real or drawn human beings (including people in costumes, cat/dog/bunny ears, "
+    "tails, horns, or cow-print clothing).\n"
+    "ANTHRO -- anthropomorphic animal characters (furry art): an animal head with a muzzle or "
+    "snout, or fur covering a humanlike body.\n"
+    "ANIMALS -- real animals, such as pets, livestock, or wildlife.\n"
+    "NOBODY -- no people or characters: text, documents, screens, objects, or scenery.\n"
+    "Example answer:\nPEOPLE: a woman sitting on a couch"
+)
+
+def _parse_anthro_describe(text: str) -> bool:
+    """ANTHRO when the label says so ("ANTHRO:", "PEOPLE/ANTHRO:") or the description calls a
+    character anthro ("PEOPLE: an anthro female character ..." is a real miss otherwise).
+    "furry" alone isn't enough -- "a woman wearing furry ears" is a human."""
+    t = (text or "").strip()
+    m = re.match(r"\W*([A-Za-z/ ]+?)\s*:", t)
+    return bool(m and "ANTHRO" in m.group(1).upper()) or bool(
+        re.search(r"\banthro(?:pomorphic)?\b", t, re.IGNORECASE))
+
 _PORN_CATEGORY_PROMPT = (
     "Look at this image. Respond with ONLY these eight labeled lines, nothing else -- no other "
     "sentences or explanations.\n"
@@ -3421,9 +3446,19 @@ def main():
                                            _parse_triage, caption_detailed, max_new_tokens=40)
 
             # 3. Anthro. Everything here ends in its regular caption and the archive. Needs a
-            # majority of frames (ANTHRO_MIN_FRACTION), not just VIDEO_FLAG_MIN_FRAMES.
+            # majority of frames (ANTHRO_MIN_FRACTION), not just VIDEO_FLAG_MIN_FRAMES, and
+            # the triage's ANTHRO line must be confirmed by _ANTHRO_DESCRIBE_PROMPT -- except
+            # for LydiaDog renders (generation info names her LoRA), which skip the check
+            # (Mike, 2026-10-10: Lydia mis-filed as her anthro self beats junk in Furry).
+            lydia_render = bool(gen_info) and any(
+                kw in gen_info.lower() for kw in LYDIADOG_GEN_INFO_KEYWORDS)
             if (frames_majority(triage, "anthro", ANTHRO_MIN_FRACTION)
-                    and not (state is not None and state.is_not_furry(asset_id))):
+                    and not (state is not None and state.is_not_furry(asset_id))
+                    and (lydia_render or frames_majority(
+                        [{"anthro": a} for a in _classify_with_prompt(
+                            [img for _, img in frames], _ANTHRO_DESCRIBE_PROMPT,
+                            _parse_anthro_describe, caption_detailed, max_new_tokens=60)],
+                        "anthro", ANTHRO_MIN_FRACTION))):
                 add("furry")
                 if is_video:
                     add("anthro_video")
