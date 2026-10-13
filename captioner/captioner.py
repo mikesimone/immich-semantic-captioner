@@ -2951,12 +2951,29 @@ class RoutingState:
             else 'p."personGroupId" = af."personGroupId"')
 
     def _exec(self, sql: str, params=None):
-        with self.conn.cursor() as cur:
-            if params is None:
-                cur.execute(sql)
-            else:
-                cur.execute(sql, params)
-            return cur.fetchall() if cur.description else None
+        try:
+            with self.conn.cursor() as cur:
+                if params is None:
+                    cur.execute(sql)
+                else:
+                    cur.execute(sql, params)
+                return cur.fetchall() if cur.description else None
+        except Exception:
+            # A dropped/closed connection (e.g. postgres restarting) leaves
+            # self.conn permanently unusable -- every call site already
+            # catches and logs its own exception, so just reconnect here and
+            # re-raise the original error; the next call gets a live
+            # connection instead of repeating "connection already closed"
+            # forever (see 2026-10-13 captioner log alert).
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            try:
+                self.conn = pg_connect()
+            except Exception:
+                pass
+            raise
 
     def _meta_get(self, key: str) -> Optional[str]:
         rows = self._exec("SELECT value FROM captioner_meta WHERE key = %s", (key,))
@@ -3777,7 +3794,20 @@ def main():
                                                exclude_face_wait=state is not None)
                 except Exception as e:
                     prefetch_q.put(("fetch_error", e))
+                    # worker_conn is permanently dead after this (e.g. postgres
+                    # restarting) -- without reconnecting here every retry just
+                    # repeats "connection already closed" forever, since this
+                    # same conn object is reused next iteration (see 2026-10-13
+                    # captioner log alert).
+                    try:
+                        worker_conn.close()
+                    except Exception:
+                        pass
                     time.sleep(1.0)
+                    try:
+                        worker_conn = pg_connect()
+                    except Exception as reconnect_err:
+                        print(f"[prefetch] reconnect failed, will retry: {reconnect_err}", flush=True)
                     continue
 
                 if not rows:
