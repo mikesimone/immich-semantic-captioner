@@ -15,14 +15,14 @@ services:
     networks:
       - immich_default
 
-    # Secrets come from ~/.api-keys (IMMICH_API_KEY, IMMICH_DB_PASSWORD), not .env.
-    # Recreate with scripts/compose.sh, which sources that file first; the :? guards
+    # Secrets (IMMICH_API_KEY, IMMICH_DB_PASSWORD) come from the Infisical vault, not .env.
+    # Recreate with scripts/compose.sh, which fetches them first; the :? guards
     # make a bare `docker compose up` from a shell without it fail instead of starting
     # with blank credentials. Addresses use CAPTIONER_-prefixed overrides so the
-    # host-side IMMICH_URL in ~/.api-keys never leaks into the container.
+    # host-side IMMICH_URL in a login shell never leaks into the container.
     environment:
       - IMMICH_URL=${CAPTIONER_IMMICH_URL:-http://immich_server:2283}
-      - IMMICH_API_KEY=${IMMICH_API_KEY:?IMMICH_API_KEY unset - source ~/.api-keys or use scripts/compose.sh}
+      - IMMICH_API_KEY=${IMMICH_API_KEY:?IMMICH_API_KEY unset - use scripts/compose.sh}
 
       - BATCH_SIZE=${BATCH_SIZE}
       - MAX_GEN_BATCH=${MAX_GEN_BATCH:-0}
@@ -48,7 +48,7 @@ services:
       - PGPORT=${CAPTIONER_PGPORT:-5432}
       - PGDATABASE=${CAPTIONER_PGDATABASE:-immich}
       - PGUSER=${CAPTIONER_PGUSER:-postgres}
-      - PGPASSWORD=${IMMICH_DB_PASSWORD:?IMMICH_DB_PASSWORD unset - source ~/.api-keys or use scripts/compose.sh}
+      - PGPASSWORD=${IMMICH_DB_PASSWORD:?IMMICH_DB_PASSWORD unset - use scripts/compose.sh}
       - USE_API_ONLY=${USE_API_ONLY}
       - PYTHONPATH=/opt/overrides
       - IDENTITY_ALBUM_MAP=${IDENTITY_ALBUM_MAP}

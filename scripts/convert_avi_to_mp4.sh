@@ -15,7 +15,7 @@
 # Backups: $BACKUP_DIR/<path under the library> -- kept until Mike says they can go.
 # Usage: scripts/convert_avi_to_mp4.sh <asset-id> [<asset-id> ...]   (DRY_RUN=1 to only print)
 set -uo pipefail
-set +u; . "$HOME/.api-keys"; set -u
+. "$(dirname "${BASH_SOURCE[0]}")/vault-env.sh"; vault_env IMMICH_URL IMMICH_API_KEY || exit 1
 : "${IMMICH_URL:?}"; : "${IMMICH_API_KEY:?}"
 BACKUP_DIR="${BACKUP_DIR:-/mnt/nvme/immich/avi-backup-20260926}"
 HOST_ROOT=/mnt/nvme/immich/library   # host side of immich_server's /data

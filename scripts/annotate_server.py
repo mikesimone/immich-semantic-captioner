@@ -43,7 +43,7 @@ def load_env():
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
-    # The key now lives in ~/.api-keys (exported by .bashrc); .env is the fallback.
+    # The key comes from the environment (fleet vault via the login shell); .env is the fallback.
     url = os.environ.get("IMMICH_URL") or env["IMMICH_URL"]
     key = os.environ.get("IMMICH_API_KEY") or env["IMMICH_API_KEY"]
     return url.rstrip("/"), key

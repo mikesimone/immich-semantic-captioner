@@ -37,7 +37,8 @@ cp .env.example .env
 ```
 
 Secrets are not kept in `.env`. Export them in the shell that runs compose
-(on WOPR they live in `~/.api-keys`, which `scripts/compose.sh` sources):
+(on WOPR they live in the fleet's Infisical vault, and `scripts/compose.sh` fetches them
+with `fleet-sync get` via `scripts/vault-env.sh`; anything already exported wins):
 
 - `IMMICH_API_KEY`
 - `IMMICH_DB_PASSWORD` (Immich's `DB_PASSWORD`; passed to the container as `PGPASSWORD`)
@@ -58,7 +59,7 @@ Edit `.env` and set:
 scripts/compose.sh up -d immich-captioner
 ```
 
-`scripts/compose.sh` sources `~/.api-keys` and runs `docker compose`; a bare
+`scripts/compose.sh` fetches the secrets from the vault and runs `docker compose`; a bare
 `docker compose` works too if the secrets are already exported, and fails with
 a clear error if they are not.
 

@@ -10,7 +10,7 @@ entry in the porn-classifier eval set, then the higher resolution, then the bigg
 the one in more albums. Before trashing the others it adds the kept copy to every album they
 were in. Trashing is Immich's soft delete (restorable from the trash for trashDays).
 
-Dry run by default; --apply to act. Run on WOPR with ~/.api-keys sourced (IMMICH_URL,
+Dry run by default; --apply to act. Run on WOPR with the fleet secrets loaded (IMMICH_URL,
 IMMICH_API_KEY); reads Postgres through `docker exec immich_postgres psql`.
 First used 2026-09-26 at Mike's request: 5 pairs trashed.
 """
