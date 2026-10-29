@@ -23,8 +23,22 @@ from PIL import Image
 # ----------------------------
 # Config
 # ----------------------------
+def _secret(name: str, default: str = "") -> str:
+    """A secret from the environment, else from SECRETS_DIR/<name> (default /run/secrets: the RAM-only files compose
+    mounts read-only from the host's /run/fleet/captioner). Reading files instead of env vars keeps secrets out of
+    Docker's saved container config; `docker exec` helpers that import this module get them the same way."""
+    v = os.environ.get(name)
+    if v:
+        return v
+    try:
+        with open(os.path.join(os.environ.get("SECRETS_DIR", "/run/secrets"), name)) as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
 IMMICH_URL = os.environ.get("IMMICH_URL", "").rstrip("/")
-IMMICH_API_KEY = os.environ.get("IMMICH_API_KEY", "")
+IMMICH_API_KEY = _secret("IMMICH_API_KEY")
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 SLEEP_SECONDS = float(os.environ.get("SLEEP_SECONDS", "0.2"))
@@ -49,7 +63,7 @@ PGHOST = os.environ.get("PGHOST", "immich_postgres")
 PGPORT = int(os.environ.get("PGPORT", "5432"))
 PGDATABASE = os.environ.get("PGDATABASE", "immich")
 PGUSER = os.environ.get("PGUSER", "postgres")
-PGPASSWORD = os.environ.get("PGPASSWORD", "")
+PGPASSWORD = os.environ.get("PGPASSWORD") or _secret("IMMICH_DB_PASSWORD")
 
 # Behavior
 MAX_CAPTION_CHARS = int(os.environ.get("MAX_CAPTION_CHARS", "900"))
@@ -138,7 +152,7 @@ MULTI_CREAMPIE_MIN_COUNT = int(os.environ.get("MULTI_CREAMPIE_MIN_COUNT", "2"))
 # is unset, unreachable, busy or times out, the video is NOT captioned with a guess -- it's
 # deferred CREAMPIE_SCORER_RETRY_SECONDS and retried (see ScorerUnavailable).
 CREAMPIE_SCORER_URL = os.environ.get("CREAMPIE_SCORER_URL", "").rstrip("/")
-CREAMPIE_SCORER_TOKEN = os.environ.get("CREAMPIE_SCORER_TOKEN", "")
+CREAMPIE_SCORER_TOKEN = _secret("CREAMPIE_SCORER_TOKEN")
 CREAMPIE_SCORER_TIMEOUT = float(os.environ.get("CREAMPIE_SCORER_TIMEOUT", "3600"))
 # Anton's firewall silently drops connections when the scorer isn't listening, so without a
 # short connect timeout every Multiple Creampie video stalls ~2 min (kernel SYN retries)
@@ -2226,7 +2240,7 @@ def refresh_asset_albums(asset_id: str, fallback: List[str]) -> List[str]:
 def pg_connect():
     import psycopg2
     if not PGPASSWORD:
-        raise RuntimeError("PGPASSWORD is empty. Set it in the captioner container environment.")
+        raise RuntimeError("Immich DB password is empty: expected /run/secrets/IMMICH_DB_PASSWORD (or PGPASSWORD in the environment).")
     conn = psycopg2.connect(
         host=PGHOST,
         port=PGPORT,

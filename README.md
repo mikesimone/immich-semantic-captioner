@@ -36,12 +36,15 @@ cd immich-semantic-captioner
 cp .env.example .env
 ```
 
-Secrets are not kept in `.env`. Export them in the shell that runs compose
-(on WOPR they live in the fleet's Infisical vault, and `scripts/compose.sh` fetches them
-with `fleet-sync get` via `scripts/vault-env.sh`; anything already exported wins):
+Secrets are not kept in `.env` and are not passed as environment variables. The container reads each one
+from a file in `/run/secrets` (`captioner.py` `_secret()`: environment first, then the file), which compose
+mounts read-only from the host directory `/run/fleet/captioner`. On WOPR that directory is RAM-only: written
+from the fleet's Infisical vault by `fleet-sync` and restored at boot from a TPM-sealed copy, so neither the
+disk nor Docker's saved container config holds a secret. Files:
 
 - `IMMICH_API_KEY`
-- `IMMICH_DB_PASSWORD` (Immich's `DB_PASSWORD`; passed to the container as `PGPASSWORD`)
+- `IMMICH_DB_PASSWORD` (Immich's `DB_PASSWORD`)
+- `CREAMPIE_SCORER_TOKEN` (optional)
 
 Addresses default to the Immich docker network (`http://immich_server:2283`,
 `immich_postgres:5432`, db `immich`, user `postgres`). Override them in `.env`
@@ -59,9 +62,7 @@ Edit `.env` and set:
 scripts/compose.sh up -d immich-captioner
 ```
 
-`scripts/compose.sh` fetches the secrets from the vault and runs `docker compose`; a bare
-`docker compose` works too if the secrets are already exported, and fails with
-a clear error if they are not.
+`scripts/compose.sh` checks that `/run/fleet/captioner` is populated and runs `docker compose`.
 
 ### 4) Watch logs
 

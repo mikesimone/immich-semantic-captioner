@@ -15,14 +15,13 @@ services:
     networks:
       - immich_default
 
-    # Secrets (IMMICH_API_KEY, IMMICH_DB_PASSWORD) come from the Infisical vault, not .env.
-    # Recreate with scripts/compose.sh, which fetches them first; the :? guards
-    # make a bare `docker compose up` from a shell without it fail instead of starting
-    # with blank credentials. Addresses use CAPTIONER_-prefixed overrides so the
-    # host-side IMMICH_URL in a login shell never leaks into the container.
+    # Secrets (IMMICH_API_KEY, IMMICH_DB_PASSWORD, CREAMPIE_SCORER_TOKEN) are NOT environment variables: captioner.py
+    # reads them from /run/secrets, the host's RAM-only /run/fleet/captioner (written from the Infisical vault by
+    # fleet-sync, restored from a TPM-sealed copy at boot), mounted read-only below. So Docker's saved container
+    # config holds no secret. Addresses use CAPTIONER_-prefixed overrides so the host-side IMMICH_URL in a login
+    # shell never leaks into the container.
     environment:
       - IMMICH_URL=${CAPTIONER_IMMICH_URL:-http://immich_server:2283}
-      - IMMICH_API_KEY=${IMMICH_API_KEY:?IMMICH_API_KEY unset - use scripts/compose.sh}
 
       - BATCH_SIZE=${BATCH_SIZE}
       - MAX_GEN_BATCH=${MAX_GEN_BATCH:-0}
@@ -48,7 +47,6 @@ services:
       - PGPORT=${CAPTIONER_PGPORT:-5432}
       - PGDATABASE=${CAPTIONER_PGDATABASE:-immich}
       - PGUSER=${CAPTIONER_PGUSER:-postgres}
-      - PGPASSWORD=${IMMICH_DB_PASSWORD:?IMMICH_DB_PASSWORD unset - use scripts/compose.sh}
       - USE_API_ONLY=${USE_API_ONLY}
       - PYTHONPATH=/opt/overrides
       - IDENTITY_ALBUM_MAP=${IDENTITY_ALBUM_MAP}
@@ -72,7 +70,6 @@ services:
       - LYDIADOG_GEN_INFO_KEYWORDS=${LYDIADOG_GEN_INFO_KEYWORDS:-lydia}
       - LYDIADOG_MIN_SIMILARITY=${LYDIADOG_MIN_SIMILARITY:-0.70}
       - CREAMPIE_SCORER_URL=${CREAMPIE_SCORER_URL:-}
-      - CREAMPIE_SCORER_TOKEN=${CREAMPIE_SCORER_TOKEN:-}
       - CREAMPIE_SCORER_TIMEOUT=${CREAMPIE_SCORER_TIMEOUT:-3600}
       - CREAMPIE_SCORER_CONNECT_TIMEOUT=${CREAMPIE_SCORER_CONNECT_TIMEOUT:-10}
       - CREAMPIE_SCORER_RETRY_SECONDS=${CREAMPIE_SCORER_RETRY_SECONDS:-600}
@@ -84,6 +81,7 @@ services:
       - captioner-hf-cache:/root/.cache/huggingface
       - ./captioner/captioner.py:/app/captioner.py:ro
       - ./captioner/overrides:/opt/overrides:ro
+      - /run/fleet/captioner:/run/secrets:ro
 
 volumes:
   captioner-hf-cache:
