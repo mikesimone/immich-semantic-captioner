@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_SCRIPT="$SCRIPT_DIR/patch_immich_archive_people.py"
 FRONTEND_PATCH_SCRIPT="$SCRIPT_DIR/patch_immich_archive_people_frontend.py"
 PARTNERS_PATCH_SCRIPT="$SCRIPT_DIR/patch_immich_archive_partners.py"
+SEARCH_PATCH_SCRIPT="$SCRIPT_DIR/patch_immich_archive_search.py"
 
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
 
@@ -62,6 +63,11 @@ while read -r _; do
         log "partners patch check/apply completed successfully"
     else
         log "PARTNERS PATCH FAILED -- see output above. Person pages for people whose photos are all archived will show a count but an empty grid. Needs a human to check what upstream Immich changed."
+    fi
+    if python3 "$SEARCH_PATCH_SCRIPT" --container "$IMMICH_CONTAINER"; then
+        log "search patch check/apply completed successfully"
+    else
+        log "SEARCH PATCH FAILED -- see output above. Search (phone and web) will skip archived photos again unless 'Search archives' is ticked. Needs a human to check what upstream Immich changed."
     fi
     if python3 "$FRONTEND_PATCH_SCRIPT" --container "$IMMICH_CONTAINER"; then
         log "frontend patch check/apply completed successfully"
