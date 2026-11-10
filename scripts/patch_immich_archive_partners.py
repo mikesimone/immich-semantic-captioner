@@ -64,6 +64,23 @@ def owner_patch(any_uuid: str, timeline_lit: str) -> tuple[str, str]:
 # unchanged. (3.3.0 also ORs shared-album assets around isOwner when personId is set; that
 # wraps isOwner from outside, so replacing isOwner still never admits a partner's archive.)
 # Both files come from the same image, so they always resolve to the same build style.
+# v3.4.0 stopped rejecting withPartners + undefined visibility with a 400 and instead silently
+# defaults it to Timeline -- the person page then loads fine and shows an empty grid for
+# archived-only people. For the viewer's OWN timeline plus partners with no visibility given, leave
+# it undefined (timeline + archive for the owner); asset.repository's isOwner patch below still
+# restricts the partners to their timeline. Any other request (another user's timeline, explicit
+# archive, album) keeps the upstream behaviour.
+V34 = (
+    "        if (includesOtherUsers) {\n"
+    "            dto.visibility ??= AssetVisibility.Timeline;\n"
+    "            if (dto.visibility !== AssetVisibility.Timeline || dto.isTrashed || dto.isFavorite !== undefined) {\n",
+    "        if (includesOtherUsers) {\n"
+    "            const ownPlusPartners = dto.withPartners && dto.visibility === undefined && dto.userId === auth.user.id;\n"
+    "            if (!ownPlusPartners) {\n"
+    "                dto.visibility ??= AssetVisibility.Timeline;\n"
+    "            }\n"
+    "            if ((!ownPlusPartners && dto.visibility !== AssetVisibility.Timeline) || dto.isTrashed || dto.isFavorite !== undefined) {\n",
+)
 V33 = (
     "const isRequestedArchived = dto.visibility === AssetVisibility.Archive || dto.visibility === undefined;",
     "const isRequestedArchived = dto.visibility === AssetVisibility.Archive;",
@@ -76,7 +93,7 @@ V32 = (
 # file -> [(description, [(old, new), ...], expected_count)]
 FILES = {
     f"{DIST}/services/timeline.service.js": [
-        ("withPartners check allows undefined visibility", [V33, V32], 1),
+        ("withPartners check allows undefined visibility", [V34, V33, V32], 1),
     ],
     f"{DIST}/repositories/asset.repository.js": [
         (

@@ -99,9 +99,23 @@ PATCHES_V33 = [
     ("getStatistics() join", *_v33_site("ownerId"), 1),
 ]
 
+# v3.4.0 denormalised visibility onto the face row (asset_face.assetVisibility / assetDeletedAt) and
+# both remaining call sites, getAllForUser() (list + counts; getNumberOfPeople() is gone) and
+# getStatistics(), build on one module-level `visibleFaces` query. One line to change. It widens
+# to timeline + archive rather than dropping the filter: dropping it would also surface people whose
+# only faces are in the PIN-locked folder (visibility 'locked'), which earlier variants did by accident.
+PATCHES_V34 = [
+    (
+        "visibleFaces (getAllForUser + getStatistics)",
+        "    .where('asset_face.assetVisibility', '=', sql.lit(AssetVisibility.Timeline))\n",
+        "    .where('asset_face.assetVisibility', 'in', [sql.lit(AssetVisibility.Timeline), sql.lit(AssetVisibility.Archive)])\n",
+        1,
+    ),
+]
+
 # Tried in order; the first variant whose every pattern matches its exact count is applied.
 # If none match fully, nothing is written (see main()).
-VARIANTS = [("3.3.x", PATCHES_V33), ("3.2.x", PATCHES_V32)]
+VARIANTS = [("3.4.x", PATCHES_V34), ("3.3.x", PATCHES_V33), ("3.2.x", PATCHES_V32)]
 
 def log(msg: str) -> None:
     print(f"[patch] {msg}", flush=True)
