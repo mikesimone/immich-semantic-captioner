@@ -162,6 +162,8 @@ don't count.
 - Added to `200.000.000 - Multiple Creampie`: the scorer's count replaces the `Separate Creampies`
   field and keeps the other fields. The asset is archived.
 - Added to `200.001.000 - Single Creampie`: archived.
+- Added to `020.000 - Unsorted - New Memes` (the meme inbox): archived, however it got there -- ChatGPT uploads through
+  immich-mcp, a hand drag, a share (Mike, 2026-11-11). Off with `MEME_ARCHIVE=0`.
 - Added to any `100.000.x` album: the scorer counts creampies, and archive state is left alone.
 
 **Video titles:** every video caption ends with `Title | <original filename without extension>`

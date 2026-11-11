@@ -3668,6 +3668,7 @@ def main():
         if not rows:
             return
         multi_id, single_id = album_id_for("multi"), album_id_for("single")
+        meme_inbox_id = album_id_for("meme_inbox")
         by_asset: Dict[str, List[dict]] = {}
         for row in rows:
             by_asset.setdefault(row["asset_id"], []).append(row)
@@ -3676,6 +3677,9 @@ def main():
             names = [r["album_name"] or "" for r in adds]
             to_multi = any(r["album_id"] == multi_id for r in adds)
             to_single = any(r["album_id"] == single_id for r in adds)
+            # Anything dropped into the meme inbox (020.000) is archived, however it got there: ChatGPT
+            # uploads through immich-mcp, a hand drag, a share. The sorter takes it from there (Mike, 2026-11-11).
+            to_meme_inbox = MEME_ARCHIVE and bool(meme_inbox_id) and any(r["album_id"] == meme_inbox_id for r in adds)
             to_counted = any(n.strip().startswith(MULTI_EVENT_COUNT_ALBUM_PREFIXES) for n in names)
             to_porn = any((album_number(n) or "").startswith("200.") for n in names)
             to_lydiadog = bool(LYDIADOG_ALBUM_PREFIX) and any(
@@ -3689,7 +3693,7 @@ def main():
                     # Still waiting for its caption: the normal pass captions it by album
                     # (and counts creampies for Multiple Creampie), so only the archive
                     # decision is made here.
-                    if to_multi or to_single:
+                    if to_multi or to_single or to_meme_inbox:
                         immich_archive(asset_id)
                 else:
                     was_parked = has_uncategorized_prefix(caption)
@@ -3703,7 +3707,7 @@ def main():
                         # An emptied caption (it was nothing but "Please Categorize") puts the
                         # asset back in the queue, to be captioned by its new album.
                         immich_update_description(asset_id, compose_description(new, gen))
-                    if to_multi or to_single or (was_parked and to_porn):
+                    if to_multi or to_single or to_meme_inbox or (was_parked and to_porn):
                         immich_archive(asset_id)
                 print(f"[move] {asset_id} added to [{', '.join(names)}] handled", flush=True)
             except ScorerUnavailable as e:
