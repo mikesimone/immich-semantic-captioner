@@ -2483,6 +2483,7 @@ _DEFAULT_ROUTING_ALBUM_NUMBERS = {
     "internet_titties": "200.010.000",
     "masturbation": "200.010.001",
     "lactation": "200.010.002",
+    "meme_inbox": "020.000",
 }
 ROUTING_ALBUM_NUMBERS = {
     **_DEFAULT_ROUTING_ALBUM_NUMBERS,
@@ -2661,6 +2662,44 @@ _ANTHRO_DESCRIBE_PROMPT = (
     "NOBODY -- no people or characters: text, documents, screens, objects, or scenery.\n"
     "Example answer:\nPEOPLE: a woman sitting on a couch"
 )
+
+# Meme inbox (Mike, 2026-11-11): obvious memes among clean (no-nudity) uploads go to
+# "020.000 - Unsorted - New Memes", which a scheduled ChatGPT routine sorts into the 020.x topics.
+# Same lesson as the anthro check: JoyCaption says Y to almost any yes/no question, so it has to
+# name what the image IS first, and the meme call also needs real OCR text or a meme-site watermark.
+MEME_ROUTING_ENABLED = os.environ.get("MEME_ROUTING_ENABLED", "1") not in ("0", "false", "no")
+MEME_ARCHIVE = os.environ.get("MEME_ARCHIVE", "1") not in ("0", "false", "no")
+_MEME_DESCRIBE_PROMPT = (
+    "What kind of image is this? Start your answer with exactly one of these words, then a colon, "
+    "then a short phrase describing it:\n"
+    "MEME -- an image made to be funny and shared online: joke or caption text added on or around a "
+    "picture, a reaction image, a funny comic, a screenshot of a joke post or tweet, a funny sign or "
+    "situation photographed and captioned for laughs.\n"
+    "PHOTO -- an ordinary personal photo of people, pets, places, food, or events, with no joke text "
+    "added.\n"
+    "SCREENSHOT -- a screenshot of an app, website, chat, document, receipt, or settings that is not a joke.\n"
+    "ART -- a drawing, painting, or 3D render that is not a joke.\n"
+    "OTHER -- anything else.\n"
+    "Example answer:\nPHOTO: a dog lying on a couch"
+)
+
+def _parse_meme_describe(text: str) -> dict:
+    m = re.match(r"\s*\W*(MEME|PHOTO|SCREENSHOT|ART|OTHER)\b", (text or "").upper())
+    return {"meme": bool(m) and m.group(1) == "MEME", "kind": m.group(1) if m else "?", "raw": (text or "")[:120]}
+
+def meme_signals(thumb: Image.Image, filename: Optional[str], ocr_text: str, caption_detailed) -> dict:
+    """Return {"meme": bool, "why": str, "kind": str}. Obvious meme = the model calls it a MEME and
+    OCR found real text on it, or a meme-site watermark is present (imgflip, iFunny, 9gag, r/...)."""
+    text = f"{filename or ''} {ocr_text or ''}"
+    watermark = any(r.search(text) for r in _WATERMARK_REGEXES)
+    desc = _classify_with_prompt([thumb], _MEME_DESCRIBE_PROMPT, _parse_meme_describe,
+                                 caption_detailed, max_new_tokens=40)[0]
+    has_text = ocr_is_meaningful(ocr_text or "")
+    if watermark and desc["kind"] != "PHOTO":
+        return {"meme": True, "why": "watermark", "kind": desc["kind"]}
+    if desc["meme"] and has_text:
+        return {"meme": True, "why": "described as meme + text", "kind": desc["kind"]}
+    return {"meme": False, "why": f"kind={desc['kind']} text={has_text} watermark={watermark}", "kind": desc["kind"]}
 
 def _parse_anthro_describe(text: str) -> bool:
     """ANTHRO when the label says so ("ANTHRO:", "PEOPLE/ANTHRO:") or the description calls a
@@ -3524,8 +3563,16 @@ def main():
                 if is_video:
                     raw, mode = caption_video(asset_id, caption_detailed, person_names=people,
                                               full_caption=True, video_path=video_path)
-                else:
-                    raw, mode = caption_image(thumb, person_names=people)
+                    return finish(raw, mode, "clean", archive=False)
+                # 4a. Obvious meme (stills only, never anything with nudity): into the meme inbox.
+                if MEME_ROUTING_ENABLED and album_id_for("meme_inbox"):
+                    sig = meme_signals(thumb, filename, ocr_fn(thumb), caption_detailed)
+                    if sig["meme"]:
+                        add("meme_inbox")
+                        print(f"[route] {asset_id} meme ({sig['why']}) -> 020.000", flush=True)
+                        raw, mode = caption_image(thumb, person_names=people)
+                        return finish(raw, mode, "meme", archive=MEME_ARCHIVE)
+                raw, mode = caption_image(thumb, person_names=people)
                 return finish(raw, mode, "clean", archive=False)
 
             # 5. Porn categories.

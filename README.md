@@ -138,7 +138,13 @@ stop processing; a stopped asset still gets its normal caption so it isn't re-qu
    anthro/anthro sex or `300.004` for human/anthro sex). A video counts as anthro only when more than half of its sampled frames say so (`ANTHRO_MIN_FRACTION`, default 0.5). Stills go to `300.005` for human/anthro sex,
    `300.000.002` for an anthro cow, and `300.006.000 - Lydia Dog` when the generation info names her
    LoRA, Immich tags her, or a low-threshold face re-detection matches her tagged faces. Archived.
-4. **Nudity**: without nudity, the regular caption, left in the timeline.
+4. **Nudity**: without nudity, the regular caption, left in the timeline -- except:
+   **4a. Obvious memes** (stills, no nudity; Mike, 2026-11-11) go to `020.000 - Unsorted - New Memes`, the inbox a
+   scheduled ChatGPT routine sorts into the 020.x topic albums, and are archived (`MEME_ARCHIVE=0` keeps them in the
+   timeline). "Obvious" = `_MEME_DESCRIBE_PROMPT` names it a MEME **and** OCR finds real text, or a meme-site watermark
+   (imgflip, iFunny, 9gag, r/...) is present. Deliberately strict: a dry run (`scripts/check_meme_route.py`) caught 8/12
+   sorted memes and filed 0/12 personal photos; misses just stay in the timeline. `MEME_ROUTING_ENABLED=0` turns it off.
+   A known person (step 2) still wins, and nothing with nudity can reach 020.000 (it's visible to the MCP/ChatGPT).
 5. **Porn categories**: solo woman goes to `200.010.000`, plus `200.010.001` if masturbating;
    cow print or horns go to Hucow; lactation goes to `200.010.002`; glory wall goes to
    `200.000.006`; tentacles or the Hentaied logo go to `200.000.008` (archive and stop). Videos
