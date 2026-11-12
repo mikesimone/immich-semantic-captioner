@@ -2521,7 +2521,10 @@ MULTI_EVENT_COUNT_ALBUM_PREFIXES = tuple(
     if p.strip()
 )
 
-_ALBUM_NUMBER_RE = re.compile(r"^\s*(\d{3}(?:\.\d{3})*)(?!\d)")
+# A number only counts when followed by whitespace, a dash, or the end ("020.000 - Title"). Without the lookahead,
+# "020.test" parsed as "020", which normalizes like "020.000", and the meme inbox lookup filed 25 memes into an album
+# Meta AI had named "020.test" (2026-11-12).
+_ALBUM_NUMBER_RE = re.compile(r"^\s*(\d{3}(?:\.\d{3})*)(?=\s|-|$)")
 _ALBUM_TITLE_RE = re.compile(r"^\s*\d{3}(?:\.\d{3})*\s*-\s*(.+?)\s*$")
 
 def album_number(album_name: str) -> Optional[str]:
@@ -2545,10 +2548,17 @@ def album_id_for(key: str) -> Optional[str]:
     number = ROUTING_ALBUM_NUMBERS.get(key)
     if number:
         want = normalize_album_number(number)
-        for a in immich_list_albums():
-            n = album_number(a.get("albumName") or "")
-            if n and normalize_album_number(n) == want:
-                return a.get("id")
+        hits = [a for a in immich_list_albums()
+                if (n := album_number(a.get("albumName") or "")) and normalize_album_number(n) == want]
+        if len(hits) > 1:
+            exact = [a for a in hits if album_number(a.get("albumName") or "") == number]
+            if key not in _missing_album_warned:
+                _missing_album_warned.add(key)
+                print(f"[route] WARNING: {len(hits)} albums are numbered {number} for '{key}': "
+                      f"{[a.get('albumName') for a in hits]} -- using {(exact or hits)[0].get('albumName')!r}", flush=True)
+            hits = exact or hits
+        if hits:
+            return hits[0].get("id")
     fallback = _ROUTING_ALBUM_FALLBACK_IDS.get(key)
     if fallback:
         return fallback
