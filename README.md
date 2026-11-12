@@ -121,6 +121,10 @@ When Postgres credentials are available (`PG*`, even with `USE_API_ONLY=true`), 
 also files new uploads and reacts to albums you file things into. Set `ROUTING_ENABLED=0` to
 turn this off.
 
+**Auto-archiving (Mike, 2026-11-12): only CamSpy.** Every "archived" below now means "would be archived with
+`AUTO_ARCHIVE=all`". With the default `AUTO_ARCHIVE=camspy`, routing still files into the same albums but leaves
+everything except CamSpy in the timeline, so mislabels are visible; skipped archives log `[archive] ... left in timeline`.
+
 **New uploads** (in no album, never captioned before) are routed in this order. Each step can
 stop processing; a stopped asset still gets its normal caption so it isn't re-queued.
 

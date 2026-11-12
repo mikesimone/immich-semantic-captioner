@@ -2100,6 +2100,17 @@ def immich_unarchive(asset_id: str) -> None:
     except Exception as e:
         print(f"[unarchive] {asset_id} failed: {e}", flush=True)
 
+# Auto-archive policy (Mike, 2026-11-12): only CamSpy is archived automatically. Everything else the captioner files
+# stays in the timeline so mislabels are visible. AUTO_ARCHIVE=all restores the old behaviour.
+AUTO_ARCHIVE = os.environ.get("AUTO_ARCHIVE", "camspy").strip().lower()
+
+def auto_archive(asset_id: str, reason: str) -> None:
+    """Archive because the captioner decided to (not a human). Honors AUTO_ARCHIVE."""
+    if reason == "camspy" or AUTO_ARCHIVE == "all":
+        immich_archive(asset_id)
+    else:
+        print(f"[archive] {asset_id} left in timeline ({reason}; AUTO_ARCHIVE={AUTO_ARCHIVE})", flush=True)
+
 def immich_archive(asset_id: str) -> None:
     try:
         url = f"{IMMICH_URL}/api/assets"
@@ -3377,7 +3388,7 @@ def main():
                 if (_FURRY_TRIGGER_RE.search(caption) and not extract_identities_from_albums(albums)
                         and not (state is not None and state.is_not_furry(asset_id))):
                     immich_add_to_album(asset_id, FURRY_ALBUM_ID)
-                    immich_archive(asset_id)
+                    auto_archive(asset_id, "furry-autofile")
 
                 if _LACTATION_TRIGGER_RE.search(caption):
                     immich_add_to_album(asset_id, LACTATION_ALBUM_ID)
@@ -3426,7 +3437,7 @@ def main():
         if not immich_update_description(asset_id, compose_description(caption, gen_info)):
             print(f"[fail] {asset_id} update failed", flush=True)
             return
-        immich_archive(asset_id)
+        auto_archive(asset_id, "camspy")
         if state is not None:
             state.mark_routed(asset_id, "camspy")
         total_done += 1
@@ -3477,7 +3488,7 @@ def main():
                 print(f"[fail] {asset_id} update failed", flush=True)
                 return outcome
             if archive:
-                immich_archive(asset_id)
+                auto_archive(asset_id, outcome)
             state.mark_routed(asset_id, outcome)
             return outcome
 
@@ -3710,7 +3721,7 @@ def main():
                     # (and counts creampies for Multiple Creampie), so only the archive
                     # decision is made here.
                     if to_multi or to_single or to_meme_inbox:
-                        immich_archive(asset_id)
+                        auto_archive(asset_id, "album-move")
                 else:
                     was_parked = has_uncategorized_prefix(caption)
                     new = strip_uncategorized_prefix(caption)
@@ -3724,7 +3735,7 @@ def main():
                         # asset back in the queue, to be captioned by its new album.
                         immich_update_description(asset_id, compose_description(new, gen))
                     if to_multi or to_single or to_meme_inbox or (was_parked and to_porn):
-                        immich_archive(asset_id)
+                        auto_archive(asset_id, "album-move")
                 print(f"[move] {asset_id} added to [{', '.join(names)}] handled", flush=True)
             except ScorerUnavailable as e:
                 # Not the move's fault: leave the membership unrecorded so the next poll
