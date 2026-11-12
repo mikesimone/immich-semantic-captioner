@@ -2545,6 +2545,12 @@ def album_title(album_name: str) -> str:
 _missing_album_warned: set = set()
 
 def album_id_for(key: str) -> Optional[str]:
+    # A pinned album ID (CAMSPY_ALBUM_ID etc.) wins whenever that album still exists: IDs survive renames and
+    # renumbering, numbers don't. Two albums numbered 400.001 ("Camspy" and "Dumb Game Porn") sent SpyPhotos to
+    # the wrong one (Mike, 2026-11-12).
+    pinned = _ROUTING_ALBUM_FALLBACK_IDS.get(key)
+    if pinned and any(a.get("id") == pinned for a in immich_list_albums()):
+        return pinned
     number = ROUTING_ALBUM_NUMBERS.get(key)
     if number:
         want = normalize_album_number(number)
